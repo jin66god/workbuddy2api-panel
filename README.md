@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jin66god/workbuddy2api-panel/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/jin66god/WorkBuddy2API?style=flat-square&color=2496ED"></a>
+  <a href="https://github.com/jin66god/workbuddy2api-panel/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/jin66god/workbuddy2api-panel?style=flat-square&color=2496ED"></a>
   <img alt="Go" src="https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-amd64%20%7C%20arm64-0DBD8B?style=flat-square">
@@ -30,6 +30,7 @@
 
 > **本仓库**是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的独立增强分支（前身为该项目的 fork，现已迁至独立仓库），面向**个人自用**的多账号运维。
 > 二进制、Docker 镜像与 Release 均以本仓库为准：`ghcr.io/jin66god/workbuddy2api`。
+> 本仓库自 2026-10-23 起为**独立仓库**（前身为 `jin66god/w2api-panel`，已归档），后续版本与 Issue 均在此维护。
 >
 > ⚠️ 仅限管理本人授权的账号，**禁止**批量注册、转售额度、加壳或卡密分发。详见[使用声明](#使用声明必读)。
 
@@ -72,7 +73,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭）：Claude Code / Codex 模板句、裸 `11-128`、DeepSeek Harness 品牌词。品牌词只改写 `system` / `developer`（实测 user 消息同一短语不触发拦截），用户输入 / assistant 回复 / 工具结果原样保留 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
-| 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题，七个视图）：账号运维 / 用量与积分分析 / 模型档位条件查询 / 在线改配置（热生效）/ 运行日志（含**调用来源 IP·UA** 与时间区间）/ 积分任务，见 [Web 管理面板](#web-管理面板) |
+| 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题，七个视图）：账号运维 / 用量与积分分析 / 模型档位条件查询 / 在线改配置（热生效）/ 运行日志（含**调用来源 IP·UA** 与时间区间，**落盘持久化**，重启/升级后保留，支持按今日/3 天/7 天/全部导出 ZIP）/ 积分任务，见 [Web 管理面板](#web-管理面板) |
 
 ## 成长任务一键完成（18/19）
 
@@ -122,6 +123,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 - **执行队列**：把待办按账号排队执行——账号内串行（与单任务/一键完成共用互斥锁），账号间可选并发（1-3）；执行进度实时更新到每个条目
 - **开学季独立状态卡**：每账号 5 任务（分享/桌面/对话×3/专家/学生认证）的状态矩阵 + 剩余抽奖次数，一键触发全账号闭环
 - **日志分频道**：运行日志按「任务 / 对话 / 系统」三个频道筛选——对话流量再大，任务结果也不会被冲掉；日志条目带频道徽标与时间
+- **历史日志保留**：三频道同时写入 `<state>/logs/panel-YYYY-MM-DD.jsonl`，启动回填最近 500 行——更新面板或重启后历史日志不再消失（默认保留 7 天 / 50 MiB，可配置）
+- **日志导出**：标题栏「导出」+ 范围选择（今日 / 近三天 / 近 7 天 / 全部），下载 ZIP（`panel-logs.ndjson` + `meta.json`）；导出前自动脱敏 token / api_key / Bearer / 手机号，单次上限 200 MiB
 
 <details>
 <summary><b>🎒 开学季活动（5/5 全自动）</b>——活动期至 2026-09-24，已结束；逆向成果存档，点击展开</summary>
@@ -272,7 +275,7 @@ curl -s http://localhost:7863/healthz
 ```bash
 # 1. 克隆（只需要 compose 文件与配置模板）
 git clone https://github.com/jin66god/workbuddy2api-panel.git
-cd WorkBuddy2API
+cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
 cp config.example.json config.json
@@ -411,6 +414,10 @@ curl -s http://localhost:7863/v1/search/messages \
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
+| `logging.panel_log_persist_enabled` | `true` | 运行日志落盘开关；关闭 = 仅保留内存 500 行，重启清空 |
+| `logging.panel_log_retention_days` | `7` | 运行日志保留天数；超期文件在启动时清理 |
+| `logging.panel_log_max_mb` | `50` | 运行日志落盘总量上限（MiB）；超限优先删除最旧文件 |
+| `logging.log_export_max_mb` | `200` | 运行日志单次导出上限（MiB）；超限返回 413 |
 | `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
