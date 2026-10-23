@@ -1,0 +1,213 @@
+name: go-binaries
+
+# 可运行二进制构建/发布：
+#   - PR / push main → 测试 + 五平台编译验证（产物仅存 artifact，不发布）
+#   - push v* tag    → 同上 + 打包上传到 GitHub Release（zip/tar.gz + checksums）
+# 固化的发布纪律（曾两次人祸，见仓库 HANDOFF）：-s -w 剥离、二进制版本串 == 源码
+# appVersion、tag 版本 == 源码版本（-ci 后缀的测试 tag 豁免，用于演练发布线）。
+on:
+  push:
+    branches: [main]
+    # 只在这些路径变化时跑（tag push 也走同一 paths 过滤，但发版必然改
+    # cmd/server/main.go 的 appVersion，故不会被挡住）。
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "config.example.json"
+      - ".github/workflows/go-binaries.yml"
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "config.example.json"
+      - ".github/workflows/go-binaries.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # tag 的运行（发布）永不取消；main / PR 的旧运行被新运行取消，避免排队白占额度。
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  build:
+    needs: test
+    # main 分支 push 只跑 test：跨平台编译在 tag（发版）、PR 与手动触发时全量验证，
+    # 省掉每次 main push 的 5 个矩阵 job（发布路径不受影响）。
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: .zip }
+          - { goos: linux, goarch: amd64, ext: .tar.gz }
+          - { goos: linux, goarch: arm64, ext: .tar.gz }
+          - { goos: darwin, goarch: amd64, ext: .tar.gz }
+          - { goos: darwin, goarch: arm64, ext: .tar.gz }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: 取源码版本号
+        id: ver
+        run: echo "v=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)" >> "$GITHUB_OUTPUT"
+
+      - name: 构建（剥离符号，对齐本地发布口径）
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: go build -ldflags "-s -w" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
+
+      # 版本串断言：二进制必须含源码 appVersion（防交叉编译矩阵里编错树/漏 ldflags）
+      - name: 断言二进制版本串
+        run: |
+          BIN="wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}"
+          if ! grep -qa "${{ steps.ver.outputs.v }}" "$BIN"; then
+            echo "::error::binary missing version string ${{ steps.ver.outputs.v }}"
+            exit 1
+          fi
+          echo "version assert OK: ${{ steps.ver.outputs.v }}"
+
+      - name: 打包（windows=zip 三件套，其余=tar.gz）
+        run: |
+          V="${{ steps.ver.outputs.v }}"
+          V="${V%-panel}"   # 文件名不带 -panel 后缀（wb2api-panel-v1.2.3-... 既有惯例）
+          case "${{ matrix.goos }}" in
+            windows)
+              NAME="wb2api-panel-v${V}-windows-amd64.zip"
+              zip -q "$NAME" wb2api.exe config.example.json README.md
+              ;;
+            *)
+              NAME="wb2api-panel-v${V}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+              tar czf "$NAME" wb2api config.example.json README.md
+              ;;
+          esac
+          echo "name=$NAME" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.name }}
+          path: ${{ env.name }}
+          retention-days: 7
+
+  # 仅 tag 触发：校验 tag == 源码版本（-ci 演练 tag 豁免）→ 汇总资产 → 建 Release
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 取历史 tag 算 compare 链接
+      - name: tag 与源码版本一致性断言
+        run: |
+          SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
+          SRC="${SRC%-panel}"   # appVersion 带 -panel 后缀，比对前剥掉
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != *-ci ]]; then
+            if [[ "$TAG" != "$SRC" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME 与源码 appVersion=$SRC 不一致（先提交版本号再打 tag）"
+              exit 1
+            fi
+          else
+            echo "演练 tag（-ci 后缀）跳过一致性断言：tag=$TAG src=$SRC"
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum *.zip *.tar.gz > checksums.txt && ls -la
+      - name: 上一版 tag（compare 链接用）
+        id: prev
+        run: |
+          # 只在「确实是当前 tag 祖先」的 tag 里取版本号最近的一个。
+          # 历史被重写（force push）后旧 tag 可能不在祖先链上，此时
+          # git describe 会跳到很久以前的 tag，把变更日志拉成十几个版本。
+          PREV=""
+          for t in $(git tag --list 'v*' --sort=-v:refname); do
+            [ "$t" = "$GITHUB_REF_NAME" ] && continue
+            if git merge-base --is-ancestor "$t" "${GITHUB_REF_NAME}^" 2>/dev/null; then
+              PREV="$t"
+              break
+            fi
+          done
+          echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+      - name: 生成本版变更日志（相对上一 tag 的提交列表）
+        id: notes
+        run: |
+          PREV="${{ steps.prev.outputs.prev }}"
+          {
+            echo "body<<RELEASE_BODY_EOF"
+            if [ -n "$PREV" ]; then
+              echo "## 更新说明"
+              echo
+              # 最多 30 条：正常一版只有几条，超出说明 tag 关系异常，不再无限拉长
+              # 只保留面向用户的变更：过滤 ci/chore/docs/test/style/build 类内部提交
+              LIST=$(git log --no-merges --pretty='- %s' "$PREV..$GITHUB_REF_NAME" \
+                | grep -Ev '^- (ci|chore|docs|test|style|build)(\(|:| )' | head -30 || true)
+              # 若全部被过滤（例如本版只有 chore(release) 提交），回退显示完整列表，避免空日志
+              if [ -z "$LIST" ]; then
+                LIST=$(git log --no-merges --pretty='- %s' "$PREV..$GITHUB_REF_NAME" | head -30)
+              fi
+              echo "$LIST"
+            else
+              echo "## 更新说明"
+              echo
+              git log --no-merges --pretty='- %s' -n 10 "$GITHUB_REF_NAME"
+            fi
+            echo "RELEASE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Release 日志格式断言
+        env:
+          BODY: ${{ steps.notes.outputs.body }}
+        run: |
+          # 标题必须是纯版本号 tag
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9] ]]; then
+            echo "::error::Release 标题必须是纯版本号（当前 $GITHUB_REF_NAME）"
+            exit 1
+          fi
+          # 必须带更新说明段落
+          if ! grep -q '^## 更新说明' <<< "$BODY"; then
+            echo "::error::Release 日志缺少「## 更新说明」段落"
+            exit 1
+          fi
+          # 禁止混入验证/部署/镜像/校验/内部备忘等非更新说明内容
+          if grep -Eq '完整变更|镜像 tag|index digest|校验|升级|部署命令|保留（不出站|勿改' <<< "$BODY"; then
+            echo "::error::Release 日志只能包含更新说明，检测到额外段落"
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: ${{ steps.notes.outputs.body }}
+          files: dist/*

@@ -1,0 +1,1666 @@
+package panel
+
+import (
+	"bytes"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestAppJSSyntax app.js / mobile.js 必须能通过 JS 解析器语法校验。
+//
+// 为什么需要：两者都是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
+// 一次对象字面量键名未加引号（Model_chat_GLM5.2 被解析成属性访问 + 数字字面量）
+// 就让整个面板白屏，而所有 Go 测试依然全绿。此测试把语法校验前移到 CI。
+// 无 node 环境时跳过（不阻塞无 Node 的构建机）。
+func TestAppJSSyntax(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available; skipping JS syntax check")
+	}
+	for _, name := range []string{"app.js", "mobile.js"} {
+		path, err := filepath.Abs(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(node, "--check", path).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s syntax error:\n%s", name, out)
+		}
+	}
+}
+
+// TestIndexHTMLNoInlineScript index.html 不得含内联 <script> 块：
+// 严格 CSP（script-src 'self'）会拦截内联脚本，页面将完全不可用。
+// 外链形式 <script src="..."> 允许。
+func TestIndexHTMLNoInlineScript(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	rest := body
+	for {
+		idx := strings.Index(rest, "<script")
+		if idx < 0 {
+			break
+		}
+		rest = rest[idx:]
+		end := strings.Index(rest, ">")
+		if end < 0 {
+			break
+		}
+		tag := rest[:end+1]
+		if !strings.Contains(tag, "src=") {
+			t.Fatalf("index.html contains inline <script> (blocked by CSP): %s", tag)
+		}
+		rest = rest[end:]
+	}
+}
+
+// TestAppJSTopLevelSmoke app.js 顶层求值冒烟（v1.11.3/1.11.4 两连炸后补的运行时闸门）：
+// node + DOM 桩执行 app.js（含按 hash 落到各视图的 go() 顶层调用），抓 TDZ/
+// ReferenceError 类运行时错误——Go 侧 frontend_test 不执行 JS，语法层检查对此全盲。
+// 无 node 的环境跳过（CI/精简机不受影响）；harness 与 app.js 同判（app.js 顶层
+// start() 的 setInterval 会让 node 事件循环不退出，故成功路径显式 exit(0)）。
+func TestAppJSTopLevelSmoke(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; JS smoke skipped")
+	}
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; },
+  apply() { return inert; },
+  construct() { return inert; },
+  has() { return true; },
+});
+const sandbox = new Proxy({
+  location: { hash: process.env.SMOKE_HASH || '#taskscenter' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { querySelectorAll: () => [], querySelector: () => inert, getElementById: () => inert, addEventListener() {}, documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  // mobile.js 顶层直接 new MutationObserver(...)（移动端表格字段名补标签）：
+  // 该文件不在本沙箱内执行，但保留此桩，将来把 mobile.js 纳入冒烟时可直接复用。
+  MutationObserver: class { constructor() {} observe() {} disconnect() {} takeRecords() { return []; } },
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+try {
+  vm.runInContext(src, sandbox, { filename: 'app.js' });
+  console.log('SMOKE OK');
+  process.exit(0);
+} catch (e) {
+  console.log('SMOKE FAIL:', (e && e.stack ? e.stack : e).toString().split('\n').slice(0, 5).join('\n'));
+  process.exit(1);
+}
+`
+	hf, err := os.CreateTemp(t.TempDir(), "smoke-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hf.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	hf.Close()
+	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
+		cmd := exec.Command(node, hf.Name(), "app.js")
+		cmd.Dir = "." // 测试工作目录 = internal/panel
+		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("app.js 顶层求值 %s 崩溃: %v\n%s", hash, err, out)
+		}
+		if !bytes.Contains(out, []byte("SMOKE OK")) {
+			t.Fatalf("app.js smoke %s 未通过:\n%s", hash, out)
+		}
+	}
+}
+
+// 积分扣除维度的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
+func TestAppJSCreditDimensionFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; credit formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+	const start = src.indexOf('function trimFixed');
+const end = src.indexOf('function usStat');
+if (start < 0 || end < 0) throw new Error('credit helpers not found');
+const ctx = { Number, String, RegExp };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(start, end) +
+  '\nthis.fmtCredit=fmtCredit; this.fmtCreditRatio=fmtCreditRatio; this.fmtModelRate=fmtModelRate;',
+  ctx
+);
+process.stdout.write(JSON.stringify({
+  credit: ctx.fmtCredit(1.25),
+  zero: ctx.fmtCredit(0),
+  hundred: ctx.fmtCredit(100),
+  ratio: ctx.fmtCreditRatio(12.5, 2, 400),
+  noSamples: ctx.fmtCreditRatio(12.5, 0, 400),
+  noTokens: ctx.fmtCreditRatio(12.5, 2, 0),
+  rate: ctx.fmtModelRate('0.5'),
+  noRate: ctx.fmtModelRate(''),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "credit-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("credit formatting node test failed: %v\n%s", err, out)
+	}
+	const want = `{"credit":"1.25","zero":"0","hundred":"100","ratio":"12.5 / 1M","noSamples":"—","noTokens":"—","rate":"x0.5","noRate":"—"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("credit formatting=%s want %s", out, want)
+	}
+}
+
+// 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
+func TestAppJSRateLimitMeta(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; rate limit formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function dur(');
+const end = src.indexOf('function rateLimitRowsHtml');
+if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
+const ctx = { Date, Number, String, Math };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
+const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
+const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
+const rate = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', reset_at: new Date(reset).toISOString(), until: new Date(until).toISOString() }, now);
+// 上游 reset_at 与网关 until 一致（未被软冷却上限截断）→ 单口径。
+const aligned = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit', reset_at: new Date(reset).toISOString(), until: new Date(reset).toISOString() }, now);
+const unavailable = ctx.rateLimitMeta({ model: 'missing', kind: 'model_unavailable', until: new Date(until).toISOString() }, now);
+const unknown = ctx.rateLimitMeta({ model: 'glm-5.3', kind: 'rate_limit' }, now);
+process.stdout.write(JSON.stringify({
+  rate: rate.detail,
+  aligned: aligned.detail,
+  unavailable: unavailable.detail,
+  unknown: unknown.detail,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "rate-limit-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
+	}
+	const want = `{"rate":"上游称 2026-09-28 16:00 恢复 · 网关 2026-09-28 15:00 起重试（剩余 1时00分）","aligned":"预计 2026-09-28 16:00 解封（剩余 2时00分）","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("rate-limit formatting=%s want %s", out, want)
+	}
+}
+
+// 请求记录行必须紧凑、可读，并带上调用来源（IP / UA）；来源缺失时以 — 兜底。
+func TestAppJSRequestLogFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; request log formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('function usStat(');
+const reqStart = src.indexOf('function requestLogText');
+const reqEnd = src.indexOf('function fmtBytes');
+if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd].some(v => v < 0)) throw new Error('request log helpers not found');
+const ctx = { Date, Number, String, Math, RegExp, isNaN };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(reqStart, reqEnd) +
+  '\nthis.requestLogText=requestLogText;',
+  ctx
+);
+const time = new Date(2026, 8, 28, 14, 5, 6).toISOString();
+const good = { time, status: 200, outcome: 'success', model: 'glm-5.3', account: '账号(uid8)', duration_ms: 1250, total_tokens: 2300, credit_known: true, credit: 0.12, request_id: 'req-1', client_ip: '203.0.113.7', user_agent: 'python-requests/2.31.0' };
+const noSource = { ...good, request_id: 'req-3', client_ip: '', user_agent: '' };
+const cached = { ...good, request_id: 'req-2', cache_hit_tokens: 2257, cache_miss_tokens: 43 };
+process.stdout.write(JSON.stringify({
+  good: ctx.requestLogText(good),
+  noSource: ctx.requestLogText(noSource),
+  cached: ctx.requestLogText(cached),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "request-log-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("request log formatting node test failed: %v\n%s", err, out)
+	}
+	text := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-1"
+	noSource := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | — | — | 1.25s | 2.3k tok | 0.12 credit | req-3"
+	cached := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | 命中 98.1% | req-2"
+	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("request log formatting=%s want %s", out, want)
+	}
+}
+
+// 积分历史区块：变动列 +N / −N（U+2212）、余额千分位、空列表提示。
+func TestAppJSCreditHistoryFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; credit history formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function creditNum');
+const end = src.indexOf('function renderCreditHistory');
+if (start < 0 || end < 0) throw new Error('credit history helpers not found');
+const ctx = { Date, Number, String, Math, RegExp, isNaN };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(start, end) +
+  '\nthis.creditEntryText=creditEntryText;this.creditHistoryNote=creditHistoryNote;',
+  ctx
+);
+const time = new Date(2026, 8, 28, 14, 5, 6).toISOString();
+process.stdout.write(JSON.stringify({
+  gain: ctx.creditEntryText({ time, uid: '89374120', account: '小明', delta: 100, before: 1300, after: 1400 }),
+  loss: ctx.creditEntryText({ time, uid: '89374120', account: '', delta: -30, before: 1400, after: 1370 }),
+  note: ctx.creditHistoryNote([{ delta: 1300 }, { delta: -60 }]),
+  empty: ctx.creditHistoryNote([]),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "credit-history-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("credit history formatting node test failed: %v\n%s", err, out)
+	}
+	gain := "14:05:06 | 小明 | +100 | 1,400 | 余额 1,300 → 1,400"
+	loss := "14:05:06 | 89374120 | −30 | 1,370 | 余额 1,400 → 1,370"
+	want := `{"gain":` + strconv.Quote(gain) + `,"loss":` + strconv.Quote(loss) +
+		`,"note":"2 条 · 净 +1,240","empty":"暂无积分变动记录"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("credit history formatting=%s want %s", out, want)
+	}
+}
+
+// 请求记录筛选：IP / UA / 模型 / 账号 / 请求 ID 的包含匹配（空格分词 AND）+ 结果精确匹配。
+func TestAppJSRequestMatch(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; request filter test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function reqMatch');
+const end = src.indexOf('function reqOutcomeTag');
+if (start < 0 || end < 0) throw new Error('reqMatch not found');
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.reqMatch=reqMatch;', ctx);
+const base = { outcome: 'success', client_ip: '203.0.113.7', user_agent: 'python-requests/2.31.0', model: 'cn:glm-5.3', account: '示例(uid8)', request_id: 'req-1' };
+const other = { outcome: 'http_error', client_ip: '198.51.100.4', user_agent: 'Mozilla/5.0 Chrome/120', model: 'global:hy3', account: '甲(uid9)', request_id: 'req-2' };
+const rows = [base, other];
+const pick = f => rows.filter(e => ctx.reqMatch(e, f)).map(e => e.request_id);
+process.stdout.write(JSON.stringify({
+  all: pick({ q: '', outcome: '' }),
+  byIP: pick({ q: '203.0.113', outcome: '' }),
+  byUA: pick({ q: 'chrome/120', outcome: '' }),
+  byModel: pick({ q: 'glm', outcome: '' }),
+  multiKw: pick({ q: 'glm success', outcome: '' }),
+  multiMiss: pick({ q: 'glm chrome', outcome: '' }),
+  byOutcome: pick({ q: '', outcome: 'http_error' }),
+  combined: pick({ q: '198.51', outcome: 'http_error' }),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "request-filter-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("request filter node test failed: %v\n%s", err, out)
+	}
+	// q 对 outcome 不参与匹配（outcome 有独立下拉），multiKw 里的 success 命中不了任何字段。
+	const want = `{"all":["req-1","req-2"],"byIP":["req-1"],"byUA":["req-2"],"byModel":["req-1"],"multiKw":[],"multiMiss":[],"byOutcome":["req-2"],"combined":["req-2"]}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("request filter=%s want %s", out, want)
+	}
+}
+
+// 模型按条件查询：域 / 能力 / 档位 / 价格 / 关键词，以及倍率、上下文、输出排序。
+func TestAppJSModelFilter(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; model filter test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function mdRateValue');
+const end = src.indexOf('function mdRowHtml');
+if (start < 0 || end < 0) throw new Error('model filter helpers not found');
+const ctx = { Number, String, Array, Object, isFinite, parseFloat };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.mdMatch=mdMatch; this.mdSortList=mdSortList; this.mdRateValue=mdRateValue;', ctx);
+const models = [
+  { id: 'cn:glm-5.2', name: 'GLM-5.2', vendor: 'Zhipu', tags: ['视觉'], supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: true, supported_efforts: ['high', 'xhigh'], default_effort: 'high', is_default: false, credits: '0.79', promo_factor: 0.5, promo_credits: '0.40', promo_label: '夜间折扣', context_length: 1000000, max_output_tokens: 131000 },
+  { id: 'cn:hy3', name: 'Hy3', supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: false, supported_efforts: ['low', 'high'], default_effort: 'high', is_default: false, credits: '0', promo_factor: 0, promo_credits: '0', promo_label: '限时免费', context_length: 192000, max_output_tokens: 64000 },
+  { id: 'global:hy3', name: 'Hy3 Global', supports_tool_call: false, supports_images: false, supports_reasoning: false, supported_efforts: [], is_default: false, credits: '0.11', context_length: 1000000, max_output_tokens: 393000 },
+  { id: 'cn:auto', name: 'Auto', supports_tool_call: true, supports_images: true, supports_reasoning: true, is_default: true, credits: null, context_length: 256000, max_output_tokens: 32000 },
+];
+const ids = list => list.map(m => m.id);
+const filter = f => ids(ctx.mdSortList(models.filter(m => ctx.mdMatch(m, f)), f));
+process.stdout.write(JSON.stringify({
+  all: ids(models),
+  realm: filter({ realm: 'cn' }),
+  tool: filter({ cap: 'tool' }),
+  vision: filter({ cap: 'vision' }),
+  reasoning: filter({ cap: 'reasoning' }),
+  isDefault: filter({ cap: 'default' }),
+  effortOff: filter({ effort: 'off' }),
+  effortLow: filter({ effort: 'low' }),
+  free: filter({ promo: 'free' }),
+  promo: filter({ promo: 'promo' }),
+  discount: filter({ promo: 'discount' }),
+  q: filter({ q: 'glm zhipu' }),
+  qMiss: filter({ q: 'glm nosuch' }),
+  sortRate: filter({ sort: 'rate' }),
+  sortContext: filter({ sort: 'context' }),
+  sortOutput: filter({ sort: 'output' }),
+  sortName: filter({ sort: 'name' }),
+  rateFree: ctx.mdRateValue(models[1]),
+  rateMissing: ctx.mdRateValue(models[3]),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "model-filter-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("model filter node test failed: %v\n%s", err, out)
+	}
+	const want = `{"all":["cn:glm-5.2","cn:hy3","global:hy3","cn:auto"],` +
+		`"realm":["cn:glm-5.2","cn:hy3","cn:auto"],` +
+		`"tool":["cn:glm-5.2","cn:hy3","cn:auto"],` +
+		`"vision":["cn:glm-5.2","cn:hy3","cn:auto"],` +
+		`"reasoning":["cn:glm-5.2","cn:hy3","cn:auto"],` +
+		`"isDefault":["cn:auto"],` +
+		`"effortOff":["cn:glm-5.2"],` +
+		`"effortLow":["cn:hy3"],` +
+		`"free":["cn:hy3"],` +
+		`"promo":["cn:glm-5.2","cn:hy3"],` +
+		`"discount":["cn:glm-5.2"],` +
+		`"q":["cn:glm-5.2"],` +
+		`"qMiss":[],` +
+		`"sortRate":["cn:hy3","global:hy3","cn:glm-5.2","cn:auto"],` +
+		`"sortContext":["cn:glm-5.2","global:hy3","cn:auto","cn:hy3"],` +
+		`"sortOutput":["global:hy3","cn:glm-5.2","cn:hy3","cn:auto"],` +
+		`"sortName":["cn:auto","cn:glm-5.2","cn:hy3","global:hy3"],` +
+		`"rateFree":0,"rateMissing":null}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("model filter=%s\nwant %s", out, want)
+	}
+}
+
+// Global 模型可用性标签：模型锁优先于最近请求；无本地证据时保持“待验证”，
+// 不能把上游目录里出现模型误判为当前账号有权限。
+func TestAppJSModelAvailability(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; model availability test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function mdAvailabilityOf');
+const end = src.indexOf('function mdRowHtml');
+if (start < 0 || end < 0) throw new Error('model availability helpers not found');
+const ctx = { esc: s => String(s) };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.mdAvailabilityOf=mdAvailabilityOf; this.mdAvailabilityTag=mdAvailabilityTag;', ctx);
+const model = id => ({ id });
+const state = (m, locks, recent) => ctx.mdAvailabilityOf(m, locks, recent).key;
+const success = [{ model: 'global:ok', status: 200, outcome: 'success', time: '2026-10-18T12:00:00Z' }];
+ctx.mdLocks = [{ realm: 'global', model: 'gpt-5.6-sol', state: 'locked', reason: '11158 model not allowed for account type' }];
+ctx.mdRecent = [];
+const deniedTag = ctx.mdAvailabilityTag(model('global:gpt-5.6-sol'));
+process.stdout.write(JSON.stringify({
+  cn: ctx.mdAvailabilityOf(model('cn:glm-5.3'), [], []),
+  unknown: state(model('global:unknown'), [], []),
+  denied: state(model('global:gpt-5.6-sol'), [{ realm: 'global', model: 'gpt-5.6-sol', state: 'locked', reason: '11158 model not allowed for account type' }], []),
+  missing: state(model('global:auto-chat'), [{ realm: 'global', model: 'auto-chat', state: 'locked', reason: '11102 service info not found' }], []),
+  partial: state(model('global:glm-5.3'), [{ realm: 'global', model: 'glm-5.3', state: 'partial', reason: '6004 model rate limit' }], []),
+  starved: state(model('global:glm-5.3'), [{ realm: 'global', model: 'glm-5.3', state: 'starved' }], []),
+  rate: state(model('global:glm-5.3'), [], [{ model: 'global:glm-5.3', status: 429 }]),
+  upstream: state(model('global:glm-5.3'), [], [{ model: 'global:glm-5.3', status: 503 }]),
+  ok: state(model('global:ok'), [], success),
+  deniedTag: deniedTag.includes('无权限') && deniedTag.includes('tag bad'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "model-availability-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("model availability node test failed: %v\n%s", err, out)
+	}
+	const want = `{"cn":null,"unknown":"unknown","denied":"denied","missing":"missing","partial":"partial","starved":"starved","rate":"rate","upstream":"upstream","ok":"ok","deniedTag":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("model availability=%s want %s", out, want)
+	}
+}
+
+// 用量时序图的柱体类名不得叫 bar：账号池的积分条是 .bar{height:3px}，而 SVG2 里
+// height 是 rect 的 CSS 几何属性——同名类会把每根柱子压成 3px 高，图看起来"没数据"。
+// 这个坑只能在浏览器里看出来，所以在这里钉住类名。
+func TestAppJSUsageChartBarClass(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; usage chart test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function parsePointTime');
+const end = src.indexOf('function fmtTokTip');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('function usStat(');
+if ([start, end, escStart, escEnd, fmtStart, fmtEnd].some(v => v < 0)) throw new Error('usage chart helpers not found');
+const host = { innerHTML: '', textContent: '' };
+const ctx = {
+  Date, Number, String, Math, RegExp, isNaN, Set, Array, Object, Infinity,
+  document: { getElementById: () => host },
+  $: () => host,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(start, end) +
+  '\nthis.renderUsageChart=renderUsageChart;', ctx);
+const series = [
+  { t: '2026-09-30T09', scope: 'hour', prompt_tokens: 35, completion_tokens: 16, total_tokens: 51, requests: 1 },
+  { t: '2026-09-30T11', scope: 'hour', prompt_tokens: 978324, completion_tokens: 20621, total_tokens: 998945, requests: 39 },
+  { t: '2026-09-30T13', scope: 'hour', prompt_tokens: 27400952, completion_tokens: 104913, total_tokens: 27505865, requests: 200 },
+];
+ctx.renderUsageChart(series);
+const svg = host.innerHTML;
+process.stdout.write(JSON.stringify({
+  hasUsbar: svg.includes('class="usbar"'),
+  hasBareBar: /class="bar"/.test(svg),
+  hasGradient: svg.includes('usGradP') && svg.includes('usGradC'),
+  barCount: (svg.match(/class="usbar"/g) || []).length,
+  hasPeak: svg.includes('峰值'),
+  hasAvg: svg.includes('均值'),
+  emptyState: (function () { ctx.renderUsageChart([]); return host.innerHTML.includes('us-empty'); })(),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "usage-chart-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("usage chart node test failed: %v\n%s", err, out)
+	}
+	const want = `{"hasUsbar":true,"hasBareBar":false,"hasGradient":true,"barCount":6,"hasPeak":true,"hasAvg":true,"emptyState":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("usage chart=%s\nwant %s", out, want)
+	}
+}
+
+// 时间范围控件：预设 → 查询参数的映射。要点：
+//   - 「今天」必须发浏览器本地时区的 00:00（服务端时区未必一致），且不带 to；
+//   - 滚动预设 rolling=true 发 hours（服务端整点对齐），rolling=false 折算成 from；
+//   - 「全部历史」两者都不发；「自定义」发用户挑的 from/to。
+func TestAppJSTimeRangeQuery(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; time range test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const TRANGE_PRESETS');
+const end = src.indexOf('function rateLimitMeta');
+if (start < 0 || end < 0 || end < start) throw new Error('trange helpers not found');
+const host = { innerHTML: '' };
+const ctx = {
+  Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams,
+  document: { getElementById: () => host },
+  $: () => host,
+  esc: s => String(s == null ? '' : s),
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) +
+  '\nthis.trangeState=trangeState; this.trangeQuery=trangeQuery; this.trangeLabel=trangeLabel; this.trangeMidnight=trangeMidnight;', ctx);
+const q = (preset, rolling) => {
+  ctx.trangeState('t').preset = preset;
+  return ctx.trangeQuery('t', rolling).toString();
+};
+const secOf = d => String(Math.floor(d.getTime() / 1000));
+const approx = (qs, wantSec) => {
+  const m = /(?:^|&)from=(\d+)/.exec(qs);
+  return m && Math.abs(Number(m[1]) - wantSec) < 120;
+};
+const now = Date.now();
+const todayQ = q('today', true);
+process.stdout.write(JSON.stringify({
+  todayIsMidnight: todayQ === 'from=' + secOf(ctx.trangeMidnight()),
+  todayNoTo: !/to=/.test(todayQ),
+  rolling24: q('24', true),
+  rolling72: q('72', true),
+  rolling0: q('0', true),
+  log0: q('0', false),
+  log24From: approx(q('24', false), Math.floor((now - 24 * 3600e3) / 1000)),
+  log24HasHours: /hours=/.test(q('24', false)),
+  log7dFrom: approx(q('168', false), Math.floor((now - 168 * 3600e3) / 1000)),
+  custom: (function () {
+    const st = ctx.trangeState('t');
+    st.preset = 'custom';
+    st.from = new Date(2026, 8, 30, 9, 0, 0);
+    st.to = new Date(2026, 8, 30, 18, 30, 0);
+    return ctx.trangeQuery('t', true).toString();
+  })(),
+  labelCustom: ctx.trangeLabel('t'),
+  labelToday: (function () { ctx.trangeState('t').preset = 'today'; return ctx.trangeLabel('t'); })(),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "trange-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("time range node test failed: %v\n%s", err, out)
+	}
+	local := func(h, m int) string {
+		return strconv.FormatInt(time.Date(2026, 9, 30, h, m, 0, 0, time.Local).Unix(), 10)
+	}
+	want := `{"todayIsMidnight":true,"todayNoTo":true,` +
+		// rolling0 必须是 "hours=0"（显式全部历史）。此前期望值是空串——那恰好把
+		// issue #121 的错误行为固化成了断言：空 query 会被后端的 72 小时缺省接管，
+		// 于是「全部历史」显示成「近 3 天」。
+		// log0 仍为空：请求记录端点没有缺省窗口，不传 from/to 就是全部历史。
+		`"rolling24":"hours=24","rolling72":"hours=72","rolling0":"hours=0","log0":"",` +
+		`"log24From":true,"log24HasHours":false,"log7dFrom":true,` +
+		`"custom":"from=` + local(9, 0) + `&to=` + local(18, 30) + `",` +
+		`"labelCustom":"9-30 09:00 → 9-30 18:30","labelToday":"今天"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("time range=%s\nwant %s", out, want)
+	}
+}
+
+// 配置表单与 CFG_MAP 必须一一对应，且面板声称"可在线改"的热生效键必须真的
+// 出现在表单里。
+//
+// 为什么需要：`logging.request_client_info` 曾经在表单里存在过，后来在某次改动中
+// 被连带删掉，而 Go 侧的配置键、livecfg 热生效通路、README 的描述都还在——面板
+// 少了一个开关而 Go 测试全绿，只有人肉点开配置页才会发现。这里把"表单字段 ↔
+// CFG_MAP"与"关键热改键必须在表单里"两条都钉住。
+func TestConfigFormMatchesCFGMap(t *testing.T) {
+	src, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(src)
+	htmlBytes, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+
+	// CFG_MAP 块（下面两条检查共用）。
+	mapBlock := js[strings.Index(js, "const CFG_MAP = {"):]
+	mapBlock = mapBlock[:strings.Index(mapBlock, "\n};")]
+	// 不能按行首匹配：CFG_MAP 里多个键写在同一行（`a: [...], b: [...]`），只有行首
+	// 那个带换行缩进。按「前面是行首或分隔符」判定才不漏。
+	inMap := func(name string) bool {
+		return regexp.MustCompile(`(?:^|[\s,{])` + regexp.QuoteMeta(name) + `:\s*\[`).MatchString(mapBlock)
+	}
+
+	// 1) 表单里的每个 name 都要有 CFG_MAP 条目（否则收集/回填都拿不到它）。
+	form := html[strings.Index(html, `<form id="cfgForm">`):]
+	form = form[:strings.Index(form, "</form>")]
+	names := map[string]bool{}
+	for _, m := range regexp.MustCompile(`name="([a-z_0-9]+)"`).FindAllStringSubmatch(form, -1) {
+		names[m[1]] = true
+	}
+	if len(names) == 0 {
+		t.Fatal("未从配置表单解析出任何 name 字段")
+	}
+	for n := range names {
+		if !inMap(n) {
+			t.Errorf("表单字段 %q 在 CFG_MAP 里没有条目（保存时会被静默丢弃）", n)
+		}
+	}
+
+	// 2) CFG_MAP 里的每个键都要在表单里有控件（否则回填/保存是空转）。
+	for _, m := range regexp.MustCompile(`(?:^|[\s,{])([a-z_0-9]+):\s*\[`).FindAllStringSubmatch(mapBlock, -1) {
+		if !names[m[1]] {
+			t.Errorf("CFG_MAP 键 %q 在配置表单里没有对应控件", m[1])
+		}
+	}
+
+	// 3) 明确断言这一个键：后端有配置项、README 说面板可改，UI 不能少。
+	if !strings.Contains(js, "request_client_info: ['logging', 'request_client_info']") {
+		t.Error("CFG_MAP 缺 request_client_info 条目")
+	}
+	if !names["request_client_info"] {
+		t.Error("配置表单缺「记录调用来源」开关（logging.request_client_info）")
+	}
+}
+
+// 同到期时间按面额降序；其余未用完包与零/负余额包分别聚合。
+func TestAppJSDetailGroups(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; detail groups test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const PK_DEFAULT_DETAIL_LIMIT');
+const end = src.indexOf('function renderPackages');
+if (start < 0 || end < 0) throw new Error('detail group functions not found');
+const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.pkDetailGroups = pkDetailGroups; this.pkDetailLimit = pkDetailLimit;', ctx);
+const input = [
+  { id: 'small-late', size: 100, remain: 1, expires_at: 400 },
+  { id: 'zero-early-b', size: 200, remain: 0, expires_at: 200 },
+  { id: 'small-early', size: 100, remain: 2, expires_at: 200 },
+  { id: 'large-unknown', size: 300, remain: 3, end_time: '' },
+  { id: 'zero-early-a', size: 200, remain: -1, expires_at: 200 },
+  { id: 'small-unknown', size: 100, remain: 1, end_time: '' },
+  { id: 'large-early', size: 300, remain: 4, expires_at: 200 },
+  { id: 'zero-late', size: 300, remain: 0, expires_at: 300 },
+];
+const before = input.map(p => p.id).join(',');
+const out = ctx.pkDetailGroups(input, 2);
+process.stdout.write(JSON.stringify({
+  visible: out.visible.map(p => p.id),
+  rest: out.rest.map(p => p.id),
+  used: out.used.map(p => p.id),
+  restSize: out.restSize,
+  restRemain: out.restRemain,
+  usedSize: out.usedSize,
+  defaultLimit: ctx.pkDetailLimit({}),
+  configuredLimit: ctx.pkDetailLimit({ panel: { package_detail_limit: 7 } }),
+  unchanged: input.map(p => p.id).join(',') === before,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "detail-groups-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("detail groups node test failed: %v\n%s", err, out)
+	}
+	const want = `{"visible":["large-early","small-early"],"rest":["small-late","large-unknown","small-unknown"],"used":["zero-early-b","zero-early-a","zero-late"],"restSize":500,"restRemain":5,"usedSize":700,"defaultLimit":5,"configuredLimit":7,"unchanged":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("detail groups=%s want %s", out, want)
+	}
+}
+
+// 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表。
+func TestAppJSExpirySummary(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry summary test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const PK_ACCOUNT_COLORS');
+const end = src.indexOf('function renderExpiryDistribution');
+if (start < 0 || end < 0) throw new Error('expiry summary functions not found');
+const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.summarizeCreditDays = summarizeCreditDays; this.pkAccountColorMap = pkAccountColorMap;', ctx);
+const day = 86400000, now = 100000;
+const out = ctx.summarizeCreditDays([
+  { uid: 'a', remain: 100, packages: [
+    { name: 'soon-a', remain: 30, expires_at: now + day },
+    { name: 'later', remain: 70, expires_at: now + 7 * day },
+  ] },
+  { uid: 'b', remain: 55, packages: [
+    { name: 'soon-b', remain: 20, expires_at: now + day },
+    { name: 'unknown', remain: 5, end_time: '' },
+  ] },
+  { uid: 'err', error: 'offline' },
+], now);
+process.stdout.write(JSON.stringify({
+  rows: out.rows.map(row => ({ days: row.days, credits: row.credits })),
+  accountCount: out.accountCount,
+  unavailable: out.unavailable,
+  colorA: ctx.pkAccountColorMap([{ uid: 'b' }, { uid: 'a' }]).get('a'),
+  colorB: ctx.pkAccountColorMap([{ uid: 'a' }, { uid: 'b' }]).get('b'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expiry-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry summary node test failed: %v\n%s", err, out)
+	}
+	const want = `{"rows":[{"days":1,"credits":50},{"days":7,"credits":70}],"accountCount":3,"unavailable":1,"colorA":"#4f8cff","colorB":"#25b08b"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry summary=%s want %s", out, want)
+	}
+}
+
+// TestAppJSCollectConfigClearable 钉住 collectConfig 的空串语义。
+//
+// 覆盖型字段（user_agent / prompt_file）空串必须照发：漏发会让面板显示"已保存"
+// 而 config.json 里的值没变（issue #102 附带发现 2）。
+//
+// 同时钉住反面：其余文本字段空串仍然不下发。这条同样重要——若哪天为了修上面那个
+// 问题改成"所有空串都发"，表单里任何一个没填的框都会变成"请清空"，静默抹掉配置。
+func TestAppJSCollectConfigClearable(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; collectConfig test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const CFG_MAP');
+const end = src.indexOf('/* Go 时长字段即时校验');
+if (start < 0 || end < 0 || end < start) throw new Error('collectConfig region not found');
+const mk = v => ({ type: 'text', value: v });
+const cfgForm = { elements: {
+  listen: mk(''),
+  api_key: mk('secret'),
+  user_agent: mk(''),
+  prompt_file: mk(''),
+  prompt_mode: mk('append'),
+  prompt_identity_override_enabled: { type: 'checkbox', checked: true },
+  prompt_identity_override_text: mk('You are CodeBuddy Code.'),
+  checkin_hours: mk(''),
+}};
+const ctx = {
+  Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
+  document: { getElementById: id => (id === 'cfgForm' ? cfgForm : null) },
+  $: id => (id === 'cfgForm' ? cfgForm : null),
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig;', ctx);
+const out = ctx.collectConfig();
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
+process.stdout.write(JSON.stringify([
+  has(out.upstream, 'user_agent'), (out.upstream || {}).user_agent,
+  has(out.prompt, 'file'), (out.prompt || {}).file,
+  has(out.prompt, 'identity_override_enabled'), (out.prompt || {}).identity_override_enabled,
+  (out.prompt || {}).identity_override_text,
+  has(out, 'listen'),
+  has(out.schedule, 'checkin_hours'),
+  out.api_key
+]));`
+	f, err := os.CreateTemp(t.TempDir(), "cfgc-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
+	}
+	// [user_agent 已发, 其值, prompt.file 已发, 其值, listen 未发, checkin_hours 未发, api_key]
+	const want = `[true,"",true,"",true,true,"You are CodeBuddy Code.",false,false,"secret"]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("collectConfig=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSExpirySortedByExpiry 到期提醒按「最近到期」升序，且不分域（issue #125）。
+//
+// 后端 /panel/api/packages 是按**余额降序**返回的，恰好把 CN 账号都排在前面、
+// global 排在末尾，看上去像"按域分组"，实际只是余额顺序。本用例刻意按这个形态构造
+// 输入（余额高的到期最晚、global 余额最低），若前端不重排就会保持该顺序而失败。
+//
+// 日期按「今天 +N 天」生成而不是写死：写死的话过了那天用例就会自己失效。
+func TestAppJSExpirySortedByExpiry(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry sort test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function expBatches');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+const sink = { innerHTML: '', textContent: '', hidden: true };
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: () => sink,
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
+const iso = n => {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
+  const p = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+};
+const pack = (days, amount) => ({ end_time: iso(days) + ' 00:00:00', remain: amount });
+// 模拟后端顺序：余额降序 → CN 高余额在前且到期最晚，global 最少且最快到期。
+const d = { accounts: [
+  { uid: 'a', nickname: 'cn-late',  realm: 'cn',     packages: [pack(16, 900)] },
+  { uid: 'b', nickname: 'cn-mid',   realm: 'cn',     packages: [pack(12, 700)] },
+  { uid: 'c', nickname: 'gl-soon',  realm: 'global', packages: [pack(2, 500)] },
+  { uid: 'd', nickname: 'no-expiry', realm: 'cn',    packages: [pack(-3, 100)] },
+  { uid: 'e', nickname: 'broken',   realm: 'cn',     error: 'offline' },
+] };
+ctx.renderExpiry(d);
+const names = [...sink.innerHTML.matchAll(/<span class="exp-nm">([^<]*)<\/span>/g)].map(m => m[1]);
+process.stdout.write(JSON.stringify(names));`
+	f, err := os.CreateTemp(t.TempDir(), "expsort-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry sort node test failed: %v\n%s", err, out)
+	}
+	// 最快到期的排最前（跨域）；无 7 天内到期的与查询失败的排最后。
+	const want = `["gl-soon","cn-mid","cn-late","no-expiry","broken"]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry order=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSExpirySnapshotRenders 到期卡片用 overview 快照即可渲染（issue #137）。
+//
+// 此前的死锁：卡片在 index.html 上写死 hidden，而唯一解除隐藏的语句在
+// renderExpiry() 末尾——该函数只有点「检查」才被调用。按钮本身就在隐藏卡片里，
+// 用户看不见也点不到，于是"积分到期提醒"这个功能等于不存在。
+//
+// 修复引入 renderExpirySnapshot()：吃 /overview 响应里的 credits_earliest_expiry /
+// credits_earliest_remaining（state.json 现成数据，零上游请求），并显式设
+// expBox.hidden = false。本用例钉住两件事：
+//  1. 只给 overview 形态的输入（没有 packages 字段）也能出内容；
+//  2. 渲染后 expBox.hidden 必须为 false——把这句删掉（还原 bug）测试就必须 FAIL。
+func TestAppJSExpirySnapshotRenders(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry snapshot test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function renderExpirySnapshot');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry snapshot region not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', textContent: '', hidden: true });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const day = n => {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
+  return d.toISOString();
+};
+// overview 形态：没有 packages 数组，只有到期快照字段。
+const d = { accounts: [
+  { uid: 'aaaaaaaa-1', nickname: '秋',     credits: 4099,
+    credits_earliest_expiry: day(2),  credits_earliest_remaining: 499 },
+  { uid: 'bbbbbbbb-2', nickname: '秋千易', credits: 3243,
+    credits_earliest_expiry: day(30), credits_earliest_remaining: 43 },
+  { uid: 'cccccccc-3', nickname: '长期包', credits: 900,
+    credits_earliest_expiry: null,    credits_earliest_remaining: 0 },
+] };
+ctx.renderExpirySnapshot(d);
+const html = sinks['expList'] ? sinks['expList'].innerHTML : '';
+const names = [...html.matchAll(/<span class="exp-nm">([^<]*)<\/span>/g)].map(m => m[1]);
+// 2 天到期的应排最前（红），30 天其次，无到期信息的排最后。
+const wantNames = JSON.stringify(['秋', '秋千易', '长期包']);
+const gotNames = JSON.stringify(names);
+process.stdout.write(JSON.stringify({
+  visible: sinks['expBox'] ? sinks['expBox'].hidden === false : false,
+  rows: names.length,
+  order: gotNames === wantNames,
+  got: gotNames,
+  want: wantNames,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expsnap-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
+	}
+	const want = `{"visible":true,"rows":3,"order":true,"got":"[\"秋\",\"秋千易\",\"长期包\"]","want":"[\"秋\",\"秋千易\",\"长期包\"]"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry snapshot=%s\nwant %s（visible 必须为 true，否则卡片仍隐藏）",
+			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSExpirySnapshotMatchesLive 钉住「打开面板看到的」与「点检查后看到的」逐字节
+// 一致（issue：首页快照与检查用了两套到期口径）。
+//
+// 做法：给同一逻辑数据的两条形态——packages（检查）与 credits_expiry_buckets（overview
+// 快照）——分别渲染，比较 expList.innerHTML。相等意味着排序、日期、该批合计、日均
+// 需耗、7 天内合计、随后批次全部一致，而不是只对齐了某一个字段。
+func TestAppJSExpirySnapshotMatchesLive(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry parity test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function expBatches');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', children: [], textContent: '', hidden: true });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry; this.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const iso = n => {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
+  const p = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+};
+// 同一天多个包：检查侧是 3 + 100 + 80，快照侧已聚合成 180。
+const live = { accounts: [
+  { uid: 'a', nickname: '同日多批', packages: [
+    { end_time: iso(0) + 'T09:00:00', remain: 3 },
+    { end_time: iso(1) + 'T09:00:00', remain: 100 },
+    { end_time: iso(1) + 'T12:00:00', remain: 80 },
+    { end_time: iso(2) + 'T09:00:00', remain: 50 },
+  ] },
+  { uid: 'b', nickname: '远期', packages: [
+    { end_time: iso(16) + 'T22:25:00', remain: 1600 },
+    { end_time: iso(17) + 'T09:00:00', remain: 400 },
+  ] },
+  { uid: 'c', nickname: '无到期', packages: [] },
+  { uid: 'd', nickname: '明天', packages: [{ end_time: iso(1) + 'T10:00:00', remain: 77 }] },
+] };
+const snap = { accounts: [
+  { uid: 'b', nickname: '远期', credits_expiry_buckets: [
+    { date: iso(16), remain: 1600 },
+    { date: iso(17), remain: 400 },
+  ] },
+  { uid: 'a', nickname: '同日多批', credits_expiry_buckets: [
+    { date: iso(2), remain: 50 },
+    { date: iso(1), remain: 180 },
+    { date: iso(0), remain: 3 },
+  ] },
+  { uid: 'c', nickname: '无到期', credits_expiry_buckets: [] },
+  { uid: 'd', nickname: '明天', credits_expiry_buckets: [{ date: iso(1), remain: 77 }] },
+] };
+ctx.renderExpiry(live);
+const liveHTML = sinks['expList'].innerHTML;
+sinks['expList'].innerHTML = '';
+ctx.renderExpirySnapshot(snap);
+const snapHTML = sinks['expList'].innerHTML;
+process.stdout.write(JSON.stringify({
+  equal: liveHTML === snapHTML,
+  today: liveHTML.includes('今天到期'),
+  tomorrow: liveHTML.includes('明天到期'),
+  weekSum: liveHTML.includes('7 天内合计'),
+  len: liveHTML.length,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expparity-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry parity node test failed: %v\n%s", err, out)
+	}
+	const want = `{"equal":true,"today":true,"tomorrow":true,"weekSum":true,"len":`
+	got := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("expiry parity=%s\nwant prefix %s（快照与检查必须逐字节一致）", got, want)
+	}
+}
+
+// TestAppJSExpirySnapshotNoteCadence 到期卡片必须如实标注数据节奏与年龄。
+// 界面本身 5 秒轮询一次 overview，但卡片数据只随余额后台刷新更新（默认每 5 分钟）；
+// 不标注的话，5 秒级的界面刷新会让人误以为数据也是 5 秒级新鲜。
+func TestAppJSExpirySnapshotNoteCadence(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry note test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+// 从 expBatches 切起：renderExpirySnapshot 的按日批次分支要调 renderExpiry，
+// 只切它自己会 ReferenceError。
+const start = src.indexOf('function expBatches');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', children: [], textContent: '', hidden: true });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const refreshedAt = new Date(Date.now() - 3 * 60000).toISOString();
+ctx.renderExpirySnapshot({ accounts: [
+  { uid: 'a', nickname: 'n', credits_expiry_buckets: [{ date: '2099-01-01', remain: 1 }] },
+], balance_refresh_sec: 300, balance_refreshed_at: refreshedAt });
+const withCadence = sinks['expNote'].textContent;
+ctx.renderExpirySnapshot({ accounts: [
+  { uid: 'a', nickname: 'n', credits_expiry_buckets: [{ date: '2099-01-01', remain: 1 }] },
+] });
+const withoutCadence = sinks['expNote'].textContent;
+process.stdout.write(JSON.stringify({
+  cadence: withCadence.includes('每 5 分钟后台刷新') && withCadence.includes('3 分钟前更新'),
+  noCadence: withoutCadence.includes('未开启后台刷新'),
+  note: withCadence,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expnote-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry note node test failed: %v\n%s", err, out)
+	}
+	const want = `{"cadence":true,"noCadence":true,"note":`
+	if !strings.HasPrefix(strings.TrimSpace(string(out)), want) {
+		t.Fatalf("expiry note=%s\nwant prefix %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestPanelIndexExpiryBoxNotHidden 到期卡片在 HTML 骨架里不得带 hidden 属性（issue #137）。
+//
+// 与上一个用例互补：app.js 侧有 renderExpirySnapshot 兜底，HTML 侧若仍写死 hidden，
+// 用户在首次 overview 返回前（以及 JS 加载失败时）看到的依然是空白。这个断言就是
+// 那个曾经卡住整个功能的属性——把它加回去测试必须 FAIL。
+func TestPanelIndexExpiryBoxNotHidden(t *testing.T) {
+	b, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 定位到期卡片那一行，只检查它自己，避免误伤其他合法的 hidden 元素。
+	idx := strings.Index(string(b), `id="expBox"`)
+	if idx < 0 {
+		t.Fatal(`index.html missing id="expBox"`)
+	}
+	lineStart := strings.LastIndex(string(b[:idx]), "\n") + 1
+	lineEnd := strings.Index(string(b[idx:]), "\n")
+	if lineEnd < 0 {
+		lineEnd = len(b) - idx
+	}
+	line := string(b[lineStart : idx+lineEnd])
+	if strings.Contains(line, "hidden") {
+		t.Fatalf(`expBox 元素不得带 hidden（issue #137 死锁根因），实际行：%s`, strings.TrimSpace(line))
+	}
+}
+
+// TestAppJSChartTooltipInsideBar 图表 tooltip 必须挂在每根柱子内部（issue #128）。
+//
+// <title> 在 SVG 里描述的是**父元素**。此前它被平铺在 <svg> 根下（<rect> 是自闭合的，
+// 无法包含子节点），于是整张图共用一个 tooltip —— 浏览器取第一个 —— 悬停任何柱子都
+// 显示同一份数据。这类问题不报错、不影响渲染，只靠肉眼看很容易漏。
+//
+// 断言结构：<g> 数量 == 数据点数，且每个 <g> 紧跟一个 <title>；同时确认没有
+// 游离在 <g> 之外的 <title>。
+func TestAppJSChartTooltipInsideBar(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; chart tooltip test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function parsePointTime');
+const chartStart = src.indexOf('function renderUsageChart');
+if (start < 0 || chartStart < 0) throw new Error('chart functions not found');
+let end = src.indexOf('\nfunction ', chartStart + 10);
+if (end < 0) end = src.length;
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', textContent: '' });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN, Infinity, isFinite, Set,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderUsageChart = renderUsageChart;', ctx);
+const series = [];
+for (let h = 0; h < 5; h++) {
+  const d = new Date(); d.setHours(d.getHours() - (4 - h), 0, 0, 0);
+  const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+              String(d.getDate()).padStart(2, '0') + 'T' + String(d.getHours()).padStart(2, '0');
+  series.push({ t: iso, scope: 'hour', prompt_tokens: (h + 1) * 100,
+                completion_tokens: (h + 1) * 10, total_tokens: (h + 1) * 110, requests: h + 1 });
+}
+ctx.renderUsageChart(series);
+const svg = sinks['usChart'] ? sinks['usChart'].innerHTML : '';
+const groups = svg.match(/<g><title>/g) || [];
+const titles = svg.match(/<title>[^<]*<\/title>/g) || [];
+// 游离的 <title>：前面不是 <g>（即仍平铺在根下）
+const loose = (svg.match(/(?:<rect[^>]*\/>|<\/g>)<title>/g) || []).length;
+process.stdout.write(JSON.stringify({
+  points: series.length, groups: groups.length, titles: titles.length, loose: loose,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "charttip-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("chart tooltip node test failed: %v\n%s", err, out)
+	}
+	const want = `{"points":5,"groups":5,"titles":5,"loose":0}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("chart tooltip structure=%s\nwant %s（groups 应等于数据点数，loose 应为 0）",
+			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 账号备注：键取 uid 前 8 位（与 renderUsageDim 账号维度、积分扣除表的 uid 前缀同源，
+// 三个表格因此能直接 join）；有备注时备注当主标识、原昵称作浅色虚体跟随；备注来自本机
+// 输入，必须转义后才能拼进 innerHTML。
+func TestAppJSRemarkName(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; remark name test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const start = src.indexOf('function remarkKey(');
+const end = src.indexOf('function storeRemarks(');
+if (escStart < 0 || escEnd < 0) throw new Error('esc helpers not found');
+if (start < 0 || end < 0) throw new Error('remark helpers not found');
+const ctx = { String, RegExp, Number };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(escStart, escEnd) + src.slice(start, end) +
+  '\nconst REM = {abcdef12: "JTOL", deadbeef: "<b>x</b>"};' +
+  '\nfunction remarksAll() { return REM; }' +
+  '\nthis.remarkKey=remarkKey; this.remarkName=remarkName;',
+  ctx
+);
+process.stdout.write(JSON.stringify({
+  key: ctx.remarkKey('ABCDEF1234567890'),
+  short: ctx.remarkKey('abc'),
+  empty: ctx.remarkKey(null),
+  remarked: ctx.remarkName('abcdef12', '张三'),
+  plain: ctx.remarkName('zzzzzzzz', '张三'),
+  escaped: ctx.remarkName('deadbeef', 'n'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "remark-name-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("remark name node test failed: %v\n%s", err, out)
+	}
+	const want = `{"key":"ABCDEF12","short":"abc","empty":"","remarked":"JTOL<span class=\"rm-ghost\">张三</span>","plain":"张三","escaped":"&lt;b&gt;x&lt;/b&gt;<span class=\"rm-ghost\">n</span>"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("remark name=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 「积分到期提醒」折叠：默认展开（点「检查」就得能看到结果），用户收起一次后由
+// localStorage 记住、重载时恢复；折叠只切列表容器的 hidden，不影响卡片与「检查」。
+func TestAppJSExpiryFold(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry fold test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('let expFoldMem');
+const endMarker = 'applyExpFold();';
+const end = src.lastIndexOf(endMarker);
+if (start < 0 || end < 0) throw new Error('expiry fold helpers not found');
+const slice = src.slice(start, end + endMarker.length);
+function boot(stored) {
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(
+    "const LS_EXP_FOLD='wb2api.expfold.v1';" +
+    "const store=" + JSON.stringify(stored) + ";" +
+    "const pad={hidden:false};" +
+    "const hint={hidden:false};" +
+    "const document={querySelector:function(){return hint;}};" +
+    "const btn={textContent:'',attrs:{},setAttribute:function(k,v){this.attrs[k]=v;}};" +
+    "function $(id){return id==='expPad'?pad:(id==='btnExpFold'?btn:null);}" +
+    "const localStorage={getItem:function(k){return (k in store)?store[k]:null;},setItem:function(k,v){store[k]=v;}};" +
+    slice +
+    "\nthis.state=function(){return {hidden:pad.hidden,hintHidden:hint.hidden,text:btn.textContent,aria:btn.attrs['aria-expanded'],raw:store['wb2api.expfold.v1']||null};};" +
+    "\nthis.click=function(){btn.onclick();};",
+    ctx
+  );
+  return ctx;
+}
+const a = boot({});
+const fresh = a.state();
+a.click();
+const folded = a.state();
+a.click();
+const unfolded = a.state();
+const restored = boot({'wb2api.expfold.v1': '1'}).state();
+process.stdout.write(JSON.stringify({fresh: fresh, folded: folded, unfolded: unfolded, restored: restored}));`
+	f, err := os.CreateTemp(t.TempDir(), "expiry-fold-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry fold node test failed: %v\n%s", err, out)
+	}
+	const want = `{"fresh":{"hidden":false,"hintHidden":false,"text":"收起","aria":"true","raw":null},"folded":{"hidden":true,"hintHidden":true,"text":"展开","aria":"false","raw":"1"},"unfolded":{"hidden":false,"hintHidden":false,"text":"收起","aria":"true","raw":"0"},"restored":{"hidden":true,"hintHidden":true,"text":"展开","aria":"false","raw":"1"}}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry fold=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 备注与折叠的接线齐备性：少一个 id 或漏一个 localStorage 键，表现为「按钮点了没反应」，
+// 而 Go 编译、JS 语法检查、顶层冒烟都发现不了（脚本能正常跑，只是挂不上）。
+func TestPanelRemarkAndFoldWiring(t *testing.T) {
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`id="btnRemarks"`, `id="remarkVeil"`, `id="remarkBody"`, `id="btnRemarkSave"`, `id="btnRemarkClear"`, `id="expPad"`, `id="btnExpFold"`} {
+		if !bytes.Contains(html, []byte(want)) {
+			t.Fatalf("index.html 缺少 %s", want)
+		}
+	}
+	// 折叠容器默认必须可见：列表一旦带上 hidden，点「检查」就看不到结果了。
+	for _, line := range strings.Split(string(html), "\n") {
+		if strings.Contains(line, `id="expPad"`) && strings.Contains(line, "hidden") {
+			t.Fatalf("index.html 的过期列表容器默认带 hidden：%s", strings.TrimSpace(line))
+		}
+	}
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"LS_REMARKS = 'wb2api.remarks.v1'",
+		"LS_EXP_FOLD = 'wb2api.expfold.v1'",
+		"function remarkKey(",
+		"function remarkName(",
+		"function applyExpFold(",
+	} {
+		if !bytes.Contains(js, []byte(want)) {
+			t.Fatalf("app.js 缺少 %s", want)
+		}
+	}
+}
+
+// TestMobileJSChartTooltipInsideBar 手机端自绘图表的 tooltip 同样要挂在柱子内部（issue #128）。
+//
+// mobile.js 在窄屏另画一张图（440×230），不走 app.js 的 renderUsageChart：上游修好
+// 桌面实现不会覆盖它。断言与 TestAppJSChartTooltipInsideBar 同构，只取文件里
+// 「接管 renderUsageChart」之后的部分，DOM/全局用桩喂进去。
+func TestMobileJSChartTooltipInsideBar(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; mobile chart tooltip test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const deskUsageChart');
+if (start < 0) throw new Error('mobile chart override not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', textContent: '' });
+const ctx = {
+  MOBILE_MQ: { matches: true },
+  renderUsageChart: () => {},
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  fmtTokTimeLabel: p => { const d = new Date(p.t.length === 13 ? p.t + ':00:00' : p.t + 'T00:00:00');
+                          return p.scope === 'day' ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0')
+                                                   : String(d.getHours()).padStart(2, '0') + ':00'; },
+  parsePointTime: p => { const d = new Date(p.t.length === 13 ? p.t + ':00:00' : p.t + 'T00:00:00');
+                         return isNaN(d.getTime()) ? null : d.getTime(); },
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN, Infinity, isFinite, Set,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start) + '\nthis.renderUsageChart = renderUsageChart;', ctx);
+const series = [];
+for (let h = 0; h < 5; h++) {
+  const d = new Date(); d.setHours(d.getHours() - (4 - h), 0, 0, 0);
+  const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+              String(d.getDate()).padStart(2, '0') + 'T' + String(d.getHours()).padStart(2, '0');
+  series.push({ t: iso, scope: 'hour', prompt_tokens: (h + 1) * 100,
+                completion_tokens: (h + 1) * 10, total_tokens: (h + 1) * 110, requests: h + 1 });
+}
+ctx.renderUsageChart(series);
+const svg = sinks['usChart'] ? sinks['usChart'].innerHTML : '';
+const groups = svg.match(/<g><title>/g) || [];
+const titles = svg.match(/<title>[^<]*<\/title>/g) || [];
+const loose = (svg.match(/(?:<rect[^>]*\/>|<\/g>)<title>/g) || []).length;
+process.stdout.write(JSON.stringify({
+  points: series.length, groups: groups.length, titles: titles.length, loose: loose,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "mobilecharttip-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "mobile.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("mobile chart tooltip node test failed: %v\n%s", err, out)
+	}
+	const want = `{"points":5,"groups":5,"titles":5,"loose":0}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("mobile chart tooltip structure=%s\nwant %s（groups 应等于数据点数，loose 应为 0）",
+			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 存储不可用（隐私模式 / 禁用站点数据）时 localStorage 访问会抛 SecurityError。
+// 回归锚点：此前 expFolded() 裸调 getItem，抛错直接中断点击处理器——用户侧表现为
+// 「点『收起』完全没有任何反应」（真实反馈）。修复后点击必须仍然折叠并给出反馈。
+func TestAppJSExpiryFoldStorageDenied(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry fold storage test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('let expFoldMem');
+const endMarker = 'applyExpFold();';
+const end = src.lastIndexOf(endMarker);
+const slice = src.slice(start, end + endMarker.length);
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(
+  "const LS_EXP_FOLD='wb2api.expfold.v1';" +
+  "const pad={hidden:false};" +
+  "const hint={hidden:false};" +
+  "const document={querySelector:function(){return hint;}};" +
+  "const btn={textContent:'',attrs:{},setAttribute:function(k,v){this.attrs[k]=v;}};" +
+  "function $(id){return id==='expPad'?pad:(id==='btnExpFold'?btn:null);}" +
+  "const localStorage={getItem:function(){throw new Error('SecurityError');},setItem:function(){throw new Error('SecurityError');}};" +
+  slice +
+  "\nthis.click=function(){btn.onclick();};" +
+  "\nthis.state=function(){return {hidden:pad.hidden,hintHidden:hint.hidden,text:btn.textContent};};",
+  ctx
+);
+const before = ctx.state();
+ctx.click();
+const after = ctx.state();
+process.stdout.write(JSON.stringify({before: before, after: after}));`
+	f, err := os.CreateTemp(t.TempDir(), "expiry-fold-storage-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry fold (storage denied) node test failed: %v\n%s", err, out)
+	}
+	const want = `{"before":{"hidden":false,"hintHidden":false,"text":"收起"},"after":{"hidden":true,"hintHidden":true,"text":"展开"}}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("storage-denied fold=%s\nwant %s（存储不可用时点击也必须折叠，不得无反应）", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 静态资源与 API 必须带 no-cache：前端随二进制发布，浏览器若复用旧 app.js，
+// 新页面里的按钮就没有事件绑定（「点收起没反应」的另一种成因）。
+func TestPanelStaticNoCacheHeaders(t *testing.T) {
+	p := newTestPanel()
+	for _, path := range []string{"/panel/", "/panel/app.js", "/panel/mobile.css", "/panel/mobile.js"} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if got := rec.Header().Get("Cache-Control"); !strings.Contains(got, "no-cache") {
+			t.Fatalf("%s Cache-Control=%q，应含 no-cache（防升级后浏览器复用旧 app.js）", path, got)
+		}
+	}
+}
+
+// 静态资源引用必须带版本查询串：面板常挂在 Cloudflare 等 CDN 后，.js/.css 被边缘缓存
+// 数小时，升级二进制不会让 CDN 回源 —— 「新页面 + 旧 app.js」时新按钮没有事件绑定，
+// 用户侧就是「点了没反应」（1.13.4「收起」按钮的真实反馈）。带版本后 URL 随发版变化，
+// CDN 与浏览器缓存自动失效。
+func TestVersionedIndexAddsAssetVersion(t *testing.T) {
+	out := string(versionedIndex("1.2.3"))
+	for _, want := range []string{`"app.js?v=1.2.3"`, `"mobile.js?v=1.2.3"`, `"mobile.css?v=1.2.3"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("index.html 缺少带版本串的资源引用 %s", want)
+		}
+	}
+	if string(versionedIndex("")) != string(indexHTML) {
+		t.Fatalf("版本为空时必须原样返回 index.html")
+	}
+}
+
+// 用实际表单函数验证地区策略回填、独立提交以及清空账号顺序。
+func TestRegionSchedulingFormRoundTrip(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available")
+	}
+	script := `const fs=require('fs'), vm=require('vm'), assert=require('assert');
+ const src=fs.readFileSync(process.argv[2],'utf8');
+ const html=fs.readFileSync('index.html','utf8');
+ const elements={};
+ for(const name of ['strategy_domestic','strategy_international','domestic_account_order','international_account_order']) {
+   assert(html.includes('name="'+name+'"'), 'missing form field '+name);
+   elements[name]={type:name.startsWith('strategy_')?'select-one':'text',value:''};
+ }
+ const cfg={pool:{strategy:{domestic:'round_robin',international:'sequential_exhaust'},account_order:{domestic:['c','a'],international:['y','x']}}};
+ const nodes={cfgForm:{elements},cfgPath:{},cfgNote:{}};
+ const ctx={cfgLoaded:null,api:async()=>({config:cfg}),$:id=>nodes[id],markDurationFields(){},toast(message){throw Error(message)}};
+ vm.createContext(ctx);
+ vm.runInContext(src.slice(src.indexOf('const CFG_MAP ='),src.indexOf('/* Go 时长字段即时校验')),ctx);
+ (async()=>{
+   await ctx.loadConfig();
+   assert.equal(elements.strategy_domestic.value,'round_robin');
+   assert.equal(elements.strategy_international.value,'sequential_exhaust');
+   assert.equal(elements.domestic_account_order.value,'c, a');
+   elements.strategy_domestic.value='weighted_random';
+   elements.international_account_order.value='';
+   const result=ctx.collectConfig();
+   assert.equal(result.pool.strategy.domestic,'weighted_random');
+   assert.equal(result.pool.strategy.international,'sequential_exhaust');
+   assert.equal(JSON.stringify(result.pool.account_order.domestic),'["c","a"]');
+   assert.equal(JSON.stringify(result.pool.account_order.international),'[]');
+   delete cfg.pool.strategy; await ctx.loadConfig();
+   assert.equal(elements.strategy_domestic.value,'weighted_random');
+   assert.equal(elements.strategy_international.value,'weighted_random');
+ })().catch(e=>{console.error(e);process.exitCode=1});`
+	fp := filepath.Join(t.TempDir(), "region-form.cjs")
+	if err = os.WriteFile(fp, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, fp, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("form round trip: %v\n%s", err, out)
+	}
+}
+
+// 面板「上游与高级」的两个新增字段（#220 cn.chat_base / #225 models.hidden）：
+// 回填时数组按逗号 join，保存时按逗号/空白切分；cn.chat_base 是「覆盖型」字段
+// （空串 = 明确回落内置默认），清空必须照发，否则用户以为改回默认了其实没变。
+func TestAppJSAdvancedConfigFields(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; advanced config test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const CFG_MAP');
+const end = src.indexOf('/* Go 时长字段即时校验');
+if (start < 0 || end < 0 || end < start) throw new Error('config region not found');
+const mk = v => ({ type: 'text', value: v });
+const cfgForm = { elements: {
+  cn_chat_base: mk(''),
+  models_hidden: mk(''),
+}};
+const notes = {};
+const ctx = {
+  Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
+  cfgLoaded: { cn: { chat_base: 'https://www.workbuddy.cn' }, models: { hidden: ['deepseek-pro', 'cn:legacy'] } },
+  api: async () => ({ config: ctx.cfgLoaded, path: '/tmp/config.json' }),
+  $: id => (id === 'cfgForm' ? cfgForm : (notes[id] = notes[id] || { textContent: '' })),
+  markDurationFields() {},
+  toast(msg) { throw new Error(msg); },
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig; this.loadConfig = loadConfig;', ctx);
+(async () => {
+  await ctx.loadConfig();
+  const filled = [cfgForm.elements.cn_chat_base.value, cfgForm.elements.models_hidden.value];
+  cfgForm.elements.cn_chat_base.value = '';           // 明确回落默认
+  cfgForm.elements.models_hidden.value = 'x，global:y';
+  const out = ctx.collectConfig();
+  process.stdout.write(JSON.stringify([filled, out.cn.chat_base, out.models.hidden]));
+})().catch(e => { console.error(e); process.exitCode = 1; });`
+	f, err := os.CreateTemp(t.TempDir(), "advcfg-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("advanced config node test failed: %v\n%s", err, out)
+	}
+	want := `[["https://www.workbuddy.cn","deepseek-pro, cn:legacy"],"",["x","global:y"]]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("advanced config=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
