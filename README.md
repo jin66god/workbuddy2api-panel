@@ -55,7 +55,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 
 > ⚠️ 非官方网关，仅限本人授权账号、本机 / 私有环境测试。合规边界见[安全与合规](#安全与合规)。
 
-> 📌 当前版本 **v1.17.3**：出站标识整体全面对齐官方 UUID 形状，不再携带 `wb2api-` 前缀或时间戳形状，详见 [CHANGELOG](CHANGELOG.md)。
+> 📌 当前版本 **v1.18.0**：运行日志落盘持久化（重启/升级后保留）并支持按今日 / 3 天 / 7 天 / 全部导出 ZIP，详见 [CHANGELOG](CHANGELOG.md)。
 
 ## 核心能力
 
@@ -293,8 +293,8 @@ curl -s http://localhost:7863/healthz
 锁定版本（生产推荐，避免 `latest` 随 `main` 漂移）：
 
 ```bash
-WB2API_TAG=1.17.3 docker compose up -d   # 版本号以 Releases 最新版为准
-# 或写入 .env 文件：WB2API_TAG=1.17.3
+WB2API_TAG=1.18.0 docker compose up -d   # 版本号以 Releases 最新版为准
+# 或写入 .env 文件：WB2API_TAG=1.18.0
 ```
 
 从源码构建（改了代码或要用未发布版本时）：
