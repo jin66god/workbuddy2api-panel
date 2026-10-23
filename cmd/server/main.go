@@ -32,7 +32,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.17.8-panel"
+const appVersion = "1.18.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -295,17 +295,23 @@ func main() {
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
 	pn := panel.New(panel.Config{
-		Pool:        p,
-		Usage:       rec,
-		RequestLog:  requestLog,
-		Upstream:    up,
-		Scheduler:   sch,
-		AuthDir:     cfg.AuthDir,
-		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
-		Live:        live,
+		Pool:       p,
+		Usage:      rec,
+		RequestLog: requestLog,
+		Upstream:   up,
+		Scheduler:  sch,
+		// 运行日志持久化（v1.18.0）：落盘 <state>/logs/panel-YYYY-MM-DD.jsonl，
+		// 启动回填 500 行，重启/升级后面板历史日志不再消失。
+		LogDir:           logDirOf(cfg),
+		LogRetentionDays: cfg.Logging.PanelLogRetentionDays,
+		LogMaxMB:         cfg.Logging.PanelLogMaxMB,
+		LogExportMaxMB:   cfg.Logging.LogExportMaxMB,
+		AuthDir:          cfg.AuthDir,
+		APIKey:           cfg.APIKey,
+		RedisMode:        redisMode,
+		StickyCount:      sessCount,
+		Version:          appVersion,
+		Live:             live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -588,7 +594,8 @@ func restartRequiredFields(c *Config) []string {
 		out = append(out, "upstash")
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
+	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
+		"logging.panel_log_persist_enabled", "logging.panel_log_retention_days", "logging.panel_log_max_mb", "logging.log_export_max_mb")
 	out = append(out, "server.read_timeout")
 	// prompt 设置由 handler 装配期捕获，面板保存后需重启才会用于新请求。
 	out = append(out, "prompt.mode", "prompt.file", "prompt.identity_override_enabled", "prompt.identity_override_text")
@@ -618,4 +625,12 @@ func mergedJSON(m map[string]any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// logDirOf 运行日志落盘目录；持久化关闭时返回空串（面板回退为纯内存）。
+func logDirOf(cfg *Config) string {
+	if !cfg.Logging.PanelLogPersistEnabled {
+		return ""
+	}
+	return stateSibling(cfg.StateFile, "logs")
 }

@@ -3580,3 +3580,38 @@ function initBoxFolds() {
   });
 }
 try { initBoxFolds(); } catch (e) {}
+
+/* 运行日志导出（v1.18.0）：按范围/当前频道下载 ZIP（服务端已脱敏）。 */
+const logExportBtn = $('btnLogExport');
+if (logExportBtn) {
+  logExportBtn.onclick = async () => {
+    const range = ($('logExportRange') && $('logExportRange').value) || 'today';
+    const chans = logCh === 'all' ? 'all' : logCh;
+    const k = localStorage.getItem(LS_KEY) || '';
+    const old = logExportBtn.textContent;
+    logExportBtn.disabled = true;
+    logExportBtn.textContent = '导出中…';
+    try {
+      const r = await fetch('/panel/api/logs/export?range=' + encodeURIComponent(range) + '&channels=' + encodeURIComponent(chans),
+        { headers: k ? { Authorization: 'Bearer ' + k } : {} });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || ('HTTP ' + r.status));
+      }
+      const b = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = 'wb2api-logs-' + new Date().toISOString().slice(0, 10) + '-' + range + '.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      toast('已导出 ' + (b.size / 1024).toFixed(1) + ' KB');
+    } catch (e) {
+      toast('导出失败：' + e.message, 'bad');
+    } finally {
+      logExportBtn.disabled = false;
+      logExportBtn.textContent = old;
+    }
+  };
+}

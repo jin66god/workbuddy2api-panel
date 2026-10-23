@@ -14,7 +14,11 @@
     "request_archive_enabled": true,
     "request_retention_days": 7,
     "request_archive_max_mb": 100,
-    "request_client_info": true
+    "request_client_info": true,
+    "panel_log_persist_enabled": true,
+    "panel_log_retention_days": 7,
+    "panel_log_max_mb": 50,
+    "log_export_max_mb": 200
   },
   "cooldown": {
     "soft_rate": "600s",

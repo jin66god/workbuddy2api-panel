@@ -56,6 +56,8 @@ type Ring struct {
 	mu      sync.Mutex
 	entries []LogEntry
 	cap     int
+	// sink 可选落盘钩子（LogStore.Append）。在锁外调用，避免写盘阻塞读快照。
+	sink func(LogEntry)
 }
 
 // NewRing 构建容量为 capacity 的日志环（非正值回退 500）。
@@ -69,19 +71,44 @@ func NewRing(capacity int) *Ring {
 // Write 按 \n 切分入环（实现 io.Writer）。空行丢弃；超容量淘汰最旧行。
 func (r *Ring) Write(p []byte) (int, error) {
 	now := time.Now()
+	var fresh []LogEntry
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for _, line := range strings.Split(strings.TrimRight(string(p), "\r\n"), "\n") {
 		if line == "" {
 			continue
 		}
 		text := tsPrefixRe.ReplaceAllString(line, "")
-		r.entries = append(r.entries, LogEntry{TS: now, Ch: classifyLine(text), Text: text})
+		e := LogEntry{TS: now, Ch: classifyLine(text), Text: text}
+		r.entries = append(r.entries, e)
+		fresh = append(fresh, e)
 		if overflow := len(r.entries) - r.cap; overflow > 0 {
 			r.entries = r.entries[overflow:]
 		}
 	}
+	sink := r.sink
+	r.mu.Unlock()
+	if sink != nil {
+		for _, e := range fresh {
+			sink(e)
+		}
+	}
 	return len(p), nil
+}
+
+// SetSink 注入落盘钩子（启动期调用一次）。
+func (r *Ring) SetSink(fn func(LogEntry)) { r.mu.Lock(); r.sink = fn; r.mu.Unlock() }
+
+// Seed 启动回填：把上次进程落盘的尾部日志放进环形缓冲。
+func (r *Ring) Seed(entries []LogEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(entries, r.entries...)
+	if overflow := len(r.entries) - r.cap; overflow > 0 {
+		r.entries = r.entries[overflow:]
+	}
 }
 
 // Snapshot 按写入顺序返回缓冲内全部条目（拷贝，调用方可安全持有）。

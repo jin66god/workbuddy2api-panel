@@ -38,6 +38,15 @@ type Config struct {
 		RequestRetentionDays int `json:"request_retention_days"`
 		// RequestArchiveMaxMB 归档总上限（MiB），缺省 100；<=0 回落默认。
 		RequestArchiveMaxMB int `json:"request_archive_max_mb"`
+		// PanelLogPersistEnabled 面板「运行日志」落盘开关，缺省 true。
+		// 关闭 = 只保留内存环形缓冲（500 行），重启即清空。
+		PanelLogPersistEnabled bool `json:"panel_log_persist_enabled"`
+		// PanelLogRetentionDays 运行日志保留天数，缺省 7；<=0 回落默认。
+		PanelLogRetentionDays int `json:"panel_log_retention_days"`
+		// PanelLogMaxMB 运行日志落盘总量上限（MiB），缺省 50；<=0 回落默认。
+		PanelLogMaxMB int `json:"panel_log_max_mb"`
+		// LogExportMaxMB 单次日志导出上限（MiB），缺省 200；<=0 回落默认。
+		LogExportMaxMB int `json:"log_export_max_mb"`
 		// RequestClientInfo 是否在请求日志（归档事件 + stdout 流水行 + 面板运行
 		// 日志）里记录调用来源：客户端 IP 与 User-Agent。缺省 true。
 		//
@@ -285,6 +294,10 @@ func Default() *Config {
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
 	c.Logging.RequestArchiveMaxMB = 100
+	c.Logging.PanelLogPersistEnabled = true
+	c.Logging.PanelLogRetentionDays = 7
+	c.Logging.PanelLogMaxMB = 50
+	c.Logging.LogExportMaxMB = 200
 	// 缺省 true 靠显式赋值实现（同 Schedule 开关）：JSON 里键缺席时字段保留此值，
 	// 只有显式 false 才关闭来源记录。
 	c.Logging.RequestClientInfo = true

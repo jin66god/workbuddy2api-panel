@@ -3,6 +3,26 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.18.0（2026-10-23）
+
+### 新增
+
+- **运行日志持久化**：面板「运行日志」的 sys / task / chat 三频道同时写入
+  `<state>/logs/panel-YYYY-MM-DD.jsonl`，进程启动时回填最近 500 行。此前只有
+  内存环形缓冲，更新面板/重启后历史日志全部消失；现在重启与升级后仍可查看。
+  保留策略与请求归档同口径：默认 7 天、总量 50 MiB，超出按最旧删除。
+- **运行日志导出**：运行日志标题栏新增「导出」按钮与范围选择（今日 / 近三天 /
+  7 天 / 全部），下载 ZIP（`panel-logs.ndjson` + `meta.json`）。导出前统一脱敏
+  token / api_key / Bearer / 手机号；单次上限 200 MiB，超限返回 413 并提示缩短
+  范围；同一时刻只允许一个导出任务。
+
+### 配置
+
+- `logging.panel_log_persist_enabled`（默认 `true`）：运行日志落盘开关
+- `logging.panel_log_retention_days`（默认 `7`）：保留天数
+- `logging.panel_log_max_mb`（默认 `50`）：落盘总量上限
+- `logging.log_export_max_mb`（默认 `200`）：单次导出上限
+
 ## v1.17.8（2026-10-23）
 
 ### 修复
