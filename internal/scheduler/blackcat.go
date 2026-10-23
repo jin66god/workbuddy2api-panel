@@ -35,6 +35,7 @@ func (s *Scheduler) runBlackcat(spread bool) {
 		}
 		plan = s.planSpread(taskBlackcat, uids)
 	}
+	list = plan.order(list)
 	for _, st := range list {
 		plan.wait(st.UID)
 		// 暂停选号（paused）账号跳过：夜猫子是全任务体系中唯一「整任务都是

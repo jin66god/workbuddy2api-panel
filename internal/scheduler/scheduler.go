@@ -531,6 +531,7 @@ func (s *Scheduler) runCheckin(spread bool) {
 		}
 		plan = s.planSpread(taskCheckin, uids)
 	}
+	list = plan.order(list)
 	for _, st := range list {
 		plan.wait(st.UID)
 		if st.Disabled && !includeDisabled {
@@ -617,6 +618,7 @@ func (s *Scheduler) runActivityCtx(ctx context.Context, spread bool) {
 		}
 		plan = s.planSpread(taskActivity, uids)
 	}
+	list = plan.order(list)
 	for _, st := range list {
 		plan.wait(st.UID)
 		if st.Disabled && !includeDisabled {
@@ -694,6 +696,7 @@ func (s *Scheduler) runKeepalive(spread bool) {
 		}
 		plan = s.planSpread(taskKeepalive, uids)
 	}
+	list = plan.order(list)
 	for _, st := range list {
 		plan.wait(st.UID)
 		if st.Disabled && !includeDisabled {

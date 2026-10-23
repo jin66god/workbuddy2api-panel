@@ -58,6 +58,7 @@ func (s *Scheduler) runTravel(spread bool) {
 		}
 		plan = s.planSpread(taskTravel, uids)
 	}
+	list = plan.order(list)
 	for _, st := range list {
 		plan.wait(st.UID)
 		if st.Disabled {

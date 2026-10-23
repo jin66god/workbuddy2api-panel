@@ -57,6 +57,18 @@ func backoffAfter(n int) time.Duration {
 	return jitterDur(d)
 }
 
+// waitPast 等待到解封时刻：只在 d 之上加**正向**抖动（0 ~ +25%），绝不提前醒来。
+//
+// 不能用 jitterDur：那是双向 ±25%，抽到小于 1 的系数时会在冷却还没解除时就醒，
+// 于是「只等一次」的额度被白花掉、客户端多等一轮后照样拿 503。往上多等一点没有
+// 代价，早醒一次就是纯损失。
+func waitPast(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return d + time.Duration(float64(d)*rand.Float64()*jitterFraction)
+}
+
 // sleepCtx 可取消的等待：ctx 取消立即返回 false（客户端断连/优雅停机不必等退避
 // 睡醒），等满返回 true。d<=0 立即放行。与 scheduler.sleepCtx 同模式（该函数未
 // 导出且 scheduler 不宜被 server 反向依赖，按任务书「等价物」口径在消费侧实现）。

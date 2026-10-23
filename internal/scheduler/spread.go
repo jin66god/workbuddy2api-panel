@@ -4,6 +4,8 @@ import (
 	"hash/fnv"
 	"sort"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // 账号级随机摊开（schedule.account_spread_minutes / account_spread_min_gap_seconds）。
@@ -87,6 +89,28 @@ func (s *Scheduler) planSpread(kind taskKind, uids []string) *spreadPlan {
 		offsets[p.uid] = p.off
 	}
 	return &spreadPlan{base: now, offsets: offsets}
+}
+
+// order 按计划时刻升序返回账号列表；计划为 nil（未启用/手动触发）时原样返回。
+//
+// 遍历必须按计划时刻、而不是 Pool.List() 的 uid 序：uid 序下若排在前面的账号计划
+// 时刻更晚，后面的账号会被逐个堵住，最后挤在同一秒跑完（上游 issue #45 实测 10 个
+// 账号塌缩成 2–3 个执行时刻）。按计划序遍历时每个 wait 都是最后一次，实际时刻 =
+// 计划时刻。
+func (p *spreadPlan) order(list []pool.Status) []pool.Status {
+	if p == nil || len(list) == 0 {
+		return list
+	}
+	out := append([]pool.Status(nil), list...)
+	sort.SliceStable(out, func(i, j int) bool {
+		oi, iok := p.offsets[out[i].UID]
+		oj, jok := p.offsets[out[j].UID]
+		if !iok || !jok {
+			return iok && !jok // 不在计划里的账号排到最后（它们本来就不等）
+		}
+		return oi < oj
+	})
+	return out
 }
 
 // wait 等到该账号的计划时刻；计划为 nil（窗口关闭/手动入口）时立即返回。

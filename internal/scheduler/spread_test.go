@@ -4,6 +4,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // issue #45：偏移必须当天确定性——同一天重启后计划不变，否则重启即重排。
@@ -56,4 +58,31 @@ func TestSpreadPlanDisabled(t *testing.T) {
 	}
 	var nilPlan *spreadPlan
 	nilPlan.wait("a") // 不应 panic / 阻塞
+}
+
+// issue #45：遍历必须按计划时刻升序，否则 uid 序里靠前的账号计划更晚时会把后面
+// 的账号逐个堵住，最后挤在同一秒跑完（10 个账号塌缩成 2–3 个时刻）。
+func TestSpreadPlanOrderByOffset(t *testing.T) {
+	p := &spreadPlan{offsets: map[string]time.Duration{
+		"a": 30 * time.Minute,
+		"b": 1 * time.Minute,
+		"c": 10 * time.Minute,
+	}}
+	list := []pool.Status{{UID: "a"}, {UID: "b"}, {UID: "c"}}
+	got := p.order(list)
+	want := []string{"b", "c", "a"}
+	for i, u := range want {
+		if got[i].UID != u {
+			t.Fatalf("order=%v want %v", []string{got[0].UID, got[1].UID, got[2].UID}, want)
+		}
+	}
+	// 原列表不能被就地改写（调用方仍按 uid 序做别的事）。
+	if list[0].UID != "a" || list[1].UID != "b" {
+		t.Fatalf("order 修改了入参: %v", list)
+	}
+	// 未启用摊开时原样返回。
+	var nilPlan *spreadPlan
+	if out := nilPlan.order(list); len(out) != len(list) || out[0].UID != "a" {
+		t.Fatalf("nil plan 应原样返回: %v", out)
+	}
 }

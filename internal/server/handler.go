@@ -915,7 +915,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 不占换号次数、不占在途名额（此刻尚未选号）；带抖动防解封瞬间聚团。
 				log.Printf("INFO: [server] model=%s: all accounts parked by 14003, waiting %s before one retry",
 					bareModel, wait.Round(time.Millisecond))
-				if !sleepCtx(r.Context(), jitterDur(wait)) {
+				if !sleepCtx(r.Context(), waitPast(wait)) {
 					break // 客户端已断连：不再等
 				}
 				tried = map[string]bool{} // 等待后允许重新尝试全部账号
@@ -1368,6 +1368,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// （限流语义、客户端应等待重试），其余保持 503。本地调度类错误（无可用账号/
 	// 传输层抖动/非上游返回的 lastErr）→ 保留自有文案 no_healthy_account（本地错误
 	// 没有上游原文可透传，不编造）。
+	// 轮转耗尽 / WAF 止损等退出路径不经过选号失败分支，modelBlock 仍是零值：
+	// 在这里补一次快照。否则同一件「全池该模型只是忙」的事，走选号失败是
+	// 503 model_busy + Retry-After，走轮转耗尽却是 429 rate_limit 且没有
+	// Retry-After（MaxRotate=1 时必现）。
+	if !modelBlock.Blocked {
+		modelBlock = h.cfg.Pool.ModelBlockedForRealm(bareModel, realm)
+	}
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
@@ -1794,16 +1801,23 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 func hasImagePart(body []byte) bool {
 	var peek struct {
 		Messages []struct {
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
+			// content 既可能是 part 数组，也可能是纯字符串或 null（system 文本、
+			// tool 消息）。按 []struct 直接解析会让**整个** Unmarshal 失败，
+			// 从而漏掉另一条消息里的图片——先按 RawMessage 收下，逐条容错。
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
 	if json.Unmarshal(body, &peek) != nil {
 		return false
 	}
 	for _, m := range peek.Messages {
-		for _, p := range m.Content {
+		var parts []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(m.Content, &parts) != nil {
+			continue // 字符串 / null / 畸形形态：本条没有 image part
+		}
+		for _, p := range parts {
 			if p.Type == "image_url" {
 				return true
 			}

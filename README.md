@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jin66god/WorkBuddy2API/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/jin66god/WorkBuddy2API?style=flat-square&color=2496ED"></a>
+  <a href="https://github.com/jin66god/workbuddy2api-panel/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/jin66god/WorkBuddy2API?style=flat-square&color=2496ED"></a>
   <img alt="Go" src="https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-amd64%20%7C%20arm64-0DBD8B?style=flat-square">
@@ -23,7 +23,7 @@
   <a href="#web-管理面板">面板</a> ·
   <a href="#api-端点">API</a> ·
   <a href="#常见问题">FAQ</a> ·
-  <a href="https://github.com/jin66god/WorkBuddy2API/releases">下载</a>
+  <a href="https://github.com/jin66god/workbuddy2api-panel/releases">下载</a>
 </p>
 
 ---
@@ -205,7 +205,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 补偿可观测 | 先查后领、截止倒计时、逐号 / 全量领取 |
 | 连登兑换 | 签到排程末尾自动兑换已解锁档位并抽完奖 |
 
-> **v1.15.0** 合并社区 PR #223（环境变量代理）、#220（`cn.chat_base`）、#225（模型黑名单）、#221（11158 与 Global 可用性）、#212（到期快照口径）、#158（地区调度）。历史演进见 [Releases](https://github.com/jin66god/WorkBuddy2API/releases)。
+> **v1.15.0** 合并社区 PR #223（环境变量代理）、#220（`cn.chat_base`）、#225（模型黑名单）、#221（11158 与 Global 可用性）、#212（到期快照口径）、#158（地区调度）。历史演进见 [Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
 ## 架构总览
 
@@ -271,7 +271,7 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆（只需要 compose 文件与配置模板）
-git clone https://github.com/jin66god/WorkBuddy2API.git
+git clone https://github.com/jin66god/workbuddy2api-panel.git
 cd WorkBuddy2API
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
