@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/jin66god/workbuddy2api-panel/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/jin66god/workbuddy2api-panel?style=flat-square&color=2496ED"></a>
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.23-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="Platform" src="https://img.shields.io/badge/Platform-amd64%20%7C%20arm64-0DBD8B?style=flat-square">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green?style=flat-square">
@@ -54,8 +54,6 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 - 面板可视化管理账号、任务、配置与日志。
 
 > ⚠️ 非官方网关，仅限本人授权账号、本机 / 私有环境测试。合规边界见[安全与合规](#安全与合规)。
-
-> 📌 当前版本 **v1.18.0**：运行日志落盘持久化（重启/升级后保留）并支持按今日 / 3 天 / 7 天 / 全部导出 ZIP，详见 [CHANGELOG](CHANGELOG.md)。
 
 ## 核心能力
 
@@ -208,8 +206,6 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 补偿可观测 | 先查后领、截止倒计时、逐号 / 全量领取 |
 | 连登兑换 | 签到排程末尾自动兑换已解锁档位并抽完奖 |
 
-> **v1.15.0** 合并社区 PR #223（环境变量代理）、#220（`cn.chat_base`）、#225（模型黑名单）、#221（11158 与 Global 可用性）、#212（到期快照口径）、#158（地区调度）。历史演进见 [Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
-
 ## 架构总览
 
 ```mermaid
@@ -240,7 +236,7 @@ flowchart LR
 - **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
 - **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.22（仅从源码构建时需要）
+- 宿主机 Go ≥ 1.27（仅从源码构建时需要）
 
 ### 方式〇：GHCR 镜像（免克隆免构建）
 
@@ -290,11 +286,16 @@ curl -s http://localhost:7863/healthz
 # {"healthy":0,"total":0,"service":"workbuddy2api"}
 ```
 
-锁定版本（生产推荐，避免 `latest` 随 `main` 漂移）：
+生产环境建议固定版本。镜像只在打 tag 时发布，`latest` 不会随 `main` 漂移：
 
 ```bash
-WB2API_TAG=1.18.0 docker compose up -d   # 版本号以 Releases 最新版为准
-# 或写入 .env 文件：WB2API_TAG=1.18.0
+# 跟随最新发布
+WB2API_TAG=latest docker compose up -d
+
+# 冻结到某一版：把 <版本号> 换成 Releases 里的 tag
+WB2API_TAG=<版本号> docker compose up -d
+
+# 也可写入 .env 文件，避免每次带环境变量
 ```
 
 从源码构建（改了代码或要用未发布版本时）：
@@ -450,7 +451,7 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
-| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
+| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 按账号身份自动：CN `WorkBuddy/5.8.3` · global `workbuddy-ai/5.8.4`，CLI 段 `2.161.0`）。官网「使用端」列按出站 UA 服务端归因 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
 | `prompt.mode` | `passthrough` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
@@ -951,7 +952,7 @@ http://127.0.0.1:7863/panel/
 | `activity/growth/tasks/accept` | POST | 接受任务（`{"task_codes":[...]}`） |
 | `activity/growth/tasks/<task_code>/claim` | POST | **领取任务奖励**（任务码在路径、无 body；**Web 域 `www.workbuddy.cn`**，非 CLI 域——这是领奖能成功的关键） |
 
-出站请求统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA（可被 `upstream.user_agent` 覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
+出站请求按账号身份携带三段式 UA（CN `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`，global `workbuddy-ai/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`，可被 `upstream.user_agent` 整体覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
 
 ## 请求级日志
 

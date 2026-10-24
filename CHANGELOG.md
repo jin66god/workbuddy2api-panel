@@ -3,6 +3,16 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.20.1（2026-10-24）
+
+### 文档
+
+- 面板「出站 User-Agent」占位提示改为实际默认值：留空时按账号身份自动
+  （CN `WorkBuddy/5.8.3`、global `workbuddy-ai/5.8.4`，CLI 段 `2.161.0`）。
+  原提示写的 `CLI/2.63.2` 是历史遗留值，会让人误以为出站 UA 是另一套形态。
+- README 清理过期版本标注（「当前版本」提示、历史 PR 合并记录、Go 版本、
+  镜像 tag 示例），版本信息统一以 Releases 与本文档为准。
+
 ## v1.20.0（2026-10-24）
 
 ### 新增
