@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
@@ -83,7 +84,16 @@ func (h *Handler) runSearch(ctx context.Context, query string, maxResults int, m
 				var ue *upstream.Error
 				if errors.As(rerr, &ue) {
 					lastStatus, lastKind = ue.Status, ue.Kind
-					h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, "", ue)
+					// 与 chat 同一判据：refresh 端点自己也被边缘拦截/抖动（HTML
+					// 401/403、5xx、429、传输错误）时没有判词，不能按 session dead
+					// 累计——否则一次边缘抖动就把健康号推向禁用。静态 Key 无 RT，
+					// 保持旧语义（refresh 必然失败 → 按账号凭证问题处置）。
+					if acct.RefreshTokenValue() == "" || refreshFailureIsVerdict(rerr) {
+						h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, "", ue)
+					} else {
+						h.cfg.Pool.CooldownSoftRate(acct.UID, jitterDur(wafCooldownBase), time.Time{}, "search refresh inconclusive")
+						h.cfg.Pool.NoteFailures(acct.UID)
+					}
 				} else {
 					h.cfg.Pool.NoteFailures(acct.UID)
 					lastStatus = http.StatusServiceUnavailable

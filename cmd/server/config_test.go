@@ -859,3 +859,42 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+// TestKeepaliveRefreshWindow 临期窗口：缺省/显式/空串回落 168h，非法与 <=0 fail fast。
+func TestKeepaliveRefreshWindow(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want time.Duration
+		bad  bool
+	}{
+		{"absent", `{}`, 168 * time.Hour, false},
+		{"explicit", `{"schedule":{"keepalive_refresh_window":"24h"}}`, 24 * time.Hour, false},
+		{"empty falls back", `{"schedule":{"keepalive_refresh_window":""}}`, 168 * time.Hour, false},
+		{"invalid", `{"schedule":{"keepalive_refresh_window":"168"}}`, 0, true},
+		{"zero", `{"schedule":{"keepalive_refresh_window":"0h"}}`, 0, true},
+		{"negative", `{"schedule":{"keepalive_refresh_window":"-1h"}}`, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "c.json")
+			if err := os.WriteFile(fp, []byte(c.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(fp)
+			if c.bad {
+				if err == nil {
+					t.Fatalf("want error for %s", c.body)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.KeepaliveRefreshWindowDur != c.want {
+				t.Fatalf("dur=%v want %v", cfg.KeepaliveRefreshWindowDur, c.want)
+			}
+		})
+	}
+}

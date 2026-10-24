@@ -431,6 +431,33 @@ func (p *Pool) AvailableUIDs() []string {
 	return uids
 }
 
+// CapacityForModel 统计「对某模型可用」与「整池可用」的账号数（供 /v1/capacity）。
+//
+// 与 AvailableUIDsForModelRealm 的差异（两处口径都要说清，避免运维对不上数）：
+//   - 不跳过在途满载账号：容量查询回答的是「池里还有多少号能服务」，准入由调用方
+//     的请求各自排队，不该因为此刻并发打满就把容量报成 0；
+//   - 计入积分保底拦截（floorBlockedForRealmModel）：被保底规则挡住、实际不会出票
+//     的号不能算「可用」，否则客户端会按虚高容量打进来。
+//
+// realm=="" 时不按域过滤（退化整池）。
+func (p *Pool) CapacityForModel(model, realm string) (modelAvailable, poolAvailable int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for _, e := range p.byUID {
+		if e.healthy(now) {
+			poolAvailable++
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if e.healthyForModel(now, model) && !p.floorBlockedForRealmModel(e, model, realm, now) {
+			modelAvailable++
+		}
+	}
+	return modelAvailable, poolAvailable
+}
+
 // AvailableUIDsForModel 同 AvailableUIDs，但把健康口径换成 healthyForModel：
 // 在该模型上被 6004 限流的账号不列入，而在**其他模型**被限流的账号照常列入（模型豁免）。
 // 供会话粘性按模型分配与命中校验；model 为空时等价于 AvailableUIDs。

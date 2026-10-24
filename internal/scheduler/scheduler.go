@@ -38,6 +38,13 @@ type Config struct {
 	AccountSpreadMinutes       int
 	AccountSpreadMinGapSeconds int
 
+	// KeepaliveRefreshWindow 周期保活的临期窗口：排程到点的 token 保活只刷新
+	// NeedsRefresh(window) 为真的账号（剩余有效期 <= window，或已过期/无 expiry），
+	// 避免每天对全部账号轮换 refresh token（上游对 RT 有反放，轮换面越大越危险）。
+	// 面板手动「全部保活」（RunKeepaliveNow）不受本窗口影响，始终全量刷新。
+	// 0 = 未配置（New 回落默认 7 天）。
+	KeepaliveRefreshWindow time.Duration
+
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
 	// <= now+window 的套餐余额标记为"快过期"（pool 据此做最早到期优先，见
 	// entry.creditsEarliestExpiry）。<=0 时不做路由门槛；展示仍使用完整逐包数据。
@@ -127,6 +134,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
+	if cfg.KeepaliveRefreshWindow == 0 {
+		cfg.KeepaliveRefreshWindow = 7 * 24 * time.Hour
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
@@ -157,6 +167,23 @@ func (s *Scheduler) SetExpiringSoonWindow(d time.Duration) {
 	if changed && poolRef != nil {
 		poolRef.ClearExpiringSnapshots()
 	}
+}
+
+// keepaliveRefreshWindow 返回周期保活的临期窗口（配置快照）。
+func (s *Scheduler) keepaliveRefreshWindow() time.Duration {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.KeepaliveRefreshWindow
+}
+
+// SetKeepaliveRefreshWindow 热更新周期保活的临期窗口
+// （schedule.keepalive_refresh_window，面板保存配置后调用）。
+// 用独立 setter 而非并入 Reconfigure：后者已有 12 个位置参数，继续追加会让调用点
+// 难以校对；本字段只影响保活过滤，语义独立。<=0 视为不过滤（等价全量刷新）。
+func (s *Scheduler) SetKeepaliveRefreshWindow(d time.Duration) {
+	s.schedMu.Lock()
+	s.cfg.KeepaliveRefreshWindow = d
+	s.schedMu.Unlock()
 }
 
 // Reconfigure 热更新排程参数（面板保存配置后调用）：改时点/开关并通知运行中的循环重算。
@@ -462,7 +489,7 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind, spread bool) {
 	case taskActivity:
 		s.runActivityCtx(ctx, spread)
 	case taskKeepalive:
-		s.runKeepalive(spread)
+		s.runKeepalive(spread, true)
 	case taskBlackcat:
 		s.runBlackcat(spread)
 	case taskGrowth:
@@ -683,9 +710,20 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(false) }
+// 手动入口始终全量；排程到点走 selective=true（只刷新临期窗口内的账号）。
+func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(false, false) }
 
-func (s *Scheduler) runKeepalive(spread bool) {
+// runKeepalive 保活遍历。spread=true（排程路径）时按账号级偏移错开，见 spread.go。
+// selective=true（排程路径）时按临期窗口过滤：token 距过期还早的账号本轮跳过，
+// 不轮换其 refresh token。窗口 <=0 视为不过滤（退化为全量）。
+func (s *Scheduler) runKeepalive(spread, selective bool) {
+	var window time.Duration
+	if selective {
+		window = s.keepaliveRefreshWindow()
+		if window <= 0 {
+			selective = false
+		}
+	}
 	includeDisabled := s.includeDisabledInTasks()
 	list := s.cfg.Pool.List()
 	var plan *spreadPlan
@@ -704,6 +742,11 @@ func (s *Scheduler) runKeepalive(spread bool) {
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			continue
+		}
+		// NeedsRefresh 对已过期/无 expiry 返回 true，天然兜底；静态 Key 恒 false
+		// 且上面已按无 RT 跳过。
+		if selective && !a.NeedsRefresh(window) {
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {

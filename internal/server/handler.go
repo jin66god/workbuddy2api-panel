@@ -191,6 +191,9 @@ func NewHandler(cfg Config) *Handler {
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// 按模型查询可用账号容量（纯本地台账，不打上游）：供负载均衡/客户端探测
+	// 「这个模型现在还有几个号能服务」，与 /status 的整池计数互补。
+	h.mux.HandleFunc("GET /v1/capacity", h.withAuth(h.capacity))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
@@ -275,6 +278,35 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"total":          total,
 		"service":        ServiceName,
 		"realm_servable": realmServable,
+	})
+}
+
+// capacity 按模型返回可用账号容量（GET /v1/capacity?model=cn:xxx）。
+//
+// 语义：
+//   - model_available_accounts：该模型此刻能出票的账号数（健康 + 未被该模型冷却 +
+//     未被积分保底挡住；不看在途，见 pool.CapacityForModel）；
+//   - available_accounts：整池健康账号数（不按模型过滤，供对照）；
+//   - models.hidden 点名的模型恒报 0——它已被网关拒绝调用，报非 0 会误导调度。
+//
+// 鉴权与 /status 同口径（withAuth）；model 缺失/空 → 400，未知模型按 0 计（不报错，
+// 客户端可据此判断该模型在本实例是否可服务）。
+func (h *Handler) capacity(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return
+	}
+	realm, bareModel := resolveModel(model)
+	modelAvailable, poolAvailable := h.cfg.Pool.CapacityForModel(bareModel, realm)
+	if _, hidden := h.loadLive().HiddenModels[realm+":"+bareModel]; hidden {
+		modelAvailable = 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":                    model,
+		"model_available_accounts": modelAvailable,
+		"available_accounts":       poolAvailable,
 	})
 }
 
@@ -1158,9 +1190,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						lastErr = rerr
 						log.Printf("WARN: [server] 401 token rejected acct=%s model=%s: refresh failed: %v",
 							logfmt.Label(acct.UID, acct.Nickname), bareModel, rerr)
-						if h.cfg.Pool.NoteSessionDead(acct.UID) {
-							log.Printf("WARN: [server] 账号 %s 连续 %d 次 token 失效 → 禁用（需重新登录）",
-								logfmt.Label(acct.UID, acct.Nickname), pool.SessionDeadThreshold())
+						// 先分辨 refresh 失败是「应用层判词」还是「又一次边缘拦截」：
+						// 只有明确判词才计 session dead；无判词（HTML 401/403、5xx、
+						// 429、传输错误）只软冷却——否则 refresh 端点被边缘拦时，
+						// 健康号会在 3 次 401 后被误禁用（issue #66 形态）。
+						// 静态 Key 无 RT，refresh 必然失败，保持旧的计死语义。
+						if acct.RefreshTokenValue() == "" || refreshFailureIsVerdict(rerr) {
+							if h.cfg.Pool.NoteSessionDead(acct.UID) {
+								log.Printf("WARN: [server] 账号 %s 连续 %d 次 token 失效 → 禁用（需重新登录）",
+									logfmt.Label(acct.UID, acct.Nickname), pool.SessionDeadThreshold())
+							}
+						} else {
+							// 用有界软冷却而非固定 60s：防「chat 恒 401 但 refresh 恒成功」
+							// 的降级 token 每 60s 轮换一次 RT。
+							h.cfg.Pool.CooldownSoftRate(acct.UID, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 (refresh inconclusive)")
+							log.Printf("INFO: [server] 账号 %s 网关 401，refresh 未给出明确判词 → 不计 session dead: %v",
+								logfmt.Label(acct.UID, acct.Nickname), rerr)
 						}
 						fail(acct.UID)
 						if !rotateBackoff(i, r.Context()) {
@@ -1169,10 +1214,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 				}
-				if h.cfg.Pool.NoteSessionDead(acct.UID) {
-					log.Printf("WARN: [server] 账号 %s 连续 %d 次 token 失效 → 禁用（需重新登录）",
-						logfmt.Label(acct.UID, acct.Nickname), pool.SessionDeadThreshold())
-				}
+				// 已刷新过仍 401：refresh 刚刚成功（否则上面已按判词/软冷却处置），
+				// 说明 token 本身可用而 chat 端点仍被拒（端点级/降级形态）。这种情形
+				// 不能计 session dead——否则「chat 恒 401 但 refresh 恒成功」的号会被
+				// 3 次请求打掉，而它其实还能服务其它端点。只软冷却让轮转绕开它。
+				h.cfg.Pool.CooldownSoftRate(acct.UID, jitterDur(wafCooldownBase), time.Time{}, "gateway 401 (after successful refresh)")
+				log.Printf("INFO: [server] 账号 %s 刷新后仍网关 401 → 不计 session dead，软冷却",
+					logfmt.Label(acct.UID, acct.Nickname))
 				lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 				fail(acct.UID)
 				if !rotateBackoff(i, r.Context()) {
@@ -1622,6 +1670,35 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 // body 仅在 ErrSoftRate/ErrAccountFault 分支用于解析重置时间/分野；model 为请求
 // 携带的模型名。uerr 是 ChatStreamContext 返回的分类信封（可携带 RetryAfter）；
 // 零值/防御路径下为 nil，冷却时长回落既有计算。
+// refreshFailureIsVerdict 判定 refresh 失败是否为「上游应用层明确判词」。
+//
+// 网关 401 有两种成因，响应体可能完全一样（APISIX/openresty 的 HTML 页，无业务
+// 信封），单看 401 分不出来：
+//
+//	a) token 真失效 → refresh 被应用层拒绝（4xx 判词）→ 该计 session dead；
+//	b) 网关瞬时拦截（风控/边缘抖动）→ refresh 端点自己也被拦（HTML 401/403、
+//	   5xx、429、传输错误）→ 没有判词，不能据此杀号。
+//
+// 只有 (a) 返回 true。判据与 Classify 的分类口径一致：非 *upstream.Error（传输层
+// 错误）、5xx、429、ErrTokenRejected/ErrWafBlock（无信封拦截页）都算「无判词」；
+// 其余 4xx（12153 session dead、invalid_grant、11140 等）才是明确拒绝。
+//
+// 为什么要这层区分：refresh 端点同样挂在 /v2/* 上，边缘瞬时拦截时它也回 HTML 页。
+// 把「拦截」当「判词」计入，就等于换个地方复发同一个误杀（3 次即禁用健康号）。
+func refreshFailureIsVerdict(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	if ue.Status >= 500 || ue.Status == http.StatusTooManyRequests {
+		return false
+	}
+	if ue.Kind == upstream.ErrTokenRejected || ue.Kind == upstream.ErrWafBlock {
+		return false
+	}
+	return ue.Status >= 400 && ue.Status < 500
+}
+
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
 	switch kind {
 	case upstream.ErrModelBusy:
@@ -1673,9 +1750,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrTokenRejected:
-		// 网关层 401（无业务信封）：chat 循环已强制 refresh 过一次，能到这里
-		// 说明刷新救不回（或来自非 chat 路径）。与 12153 同用连续计数软着陆：
-		// 单次可能是网关抖动，连续 3 次才禁用，避免一次 401 就永久杀号。
+		// 网关层 401（无业务信封）：调用方必须已按 refreshFailureIsVerdict 求证过
+		// （chat 循环 / search 预刷新路径），能到这里即「refresh 给出明确判词」或
+		// 「账号无 RT（静态 Key）」。与 12153 同用连续计数软着陆：单次可能是网关
+		// 抖动，连续 3 次才禁用，避免一次 401 就永久杀号。
 		if h.cfg.Pool.NoteSessionDead(uid) {
 			log.Printf("WARN: [server] 账号 %s 连续 %d 次 token 失效（401 网关拒绝）→ 禁用（需重新登录）",
 				logfmt.Label(uid, ""), pool.SessionDeadThreshold())

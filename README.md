@@ -425,7 +425,8 @@ curl -s http://localhost:7863/v1/search/messages \
 | `schedule.account_spread_min_gap_seconds` | `0` | 摊开后的最小账号间隔（秒）。只做冲突兜底：先随机、落在该间隔内的后者才往后推，不会变成等距；`0` = 不设下限 |
 | `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
 | `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 `first_buddy`） |
-| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
+| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点触发周期 token 保活；仅刷新临期窗口内的凭证 |
+| `schedule.keepalive_refresh_window` | `168h` | 周期保活的临期窗口：剩余有效期不超过该时长才刷新；已过期/无 expiry 仍刷新；面板「全部保活」手动入口仍全量 |
 | `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
 | `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
@@ -627,7 +628,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 | 签到 | `schedule.checkin_enabled` | `checkin_hours` `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号。**末尾追加连登管家**（见下） |
 | 活跃上报 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 对话活跃上报（`chat_request_send` 事件，必须含 `userId`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
 | 猫猫旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖 |
-| 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
+| 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 刷新临期窗口（默认 7 天）内的 token；手动「全部保活」全量；session 失效**连续 3 次**才自动禁用 |
 | 夜猫子 | `schedule.blackcat_enabled` | `blackcat_hours` `[23]` 整点 | **先查任务进度再决定**：`black_cat` 未达标才在 23:00–08:00 计数窗口内补足 glm-5.2 短对话（每天 1 次累计 3 天，漏跑次日窗口自动补） |
 
 #### 禁用账号与保号任务（`schedule.include_disabled_in_tasks`）

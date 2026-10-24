@@ -3,6 +3,34 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.19.0（2026-10-24）
+
+### 新增
+
+- **按模型查询可用容量**：新增 `GET /v1/capacity?model=<cn:|global:>模型名`，返回
+  该模型此刻可出票的账号数（`model_available_accounts`）与整池健康账号数
+  （`available_accounts`）。纯本地台账、不打上游，供负载均衡/客户端判断某模型在
+  本实例是否可服务；被 `models.hidden` 点名的模型恒报 0。鉴权与 `/status` 同口径。
+- **保活临期窗口**：周期 token 保活不再每天对全部账号轮换 refresh token，只刷新
+  剩余有效期不超过窗口（默认 7 天）的凭证；已过期/无到期时间的账号始终刷新。
+  面板「全部保活」手动入口仍全量。上游对 refresh token 有反重放，减少无谓轮换
+  同时降低风控暴露面。
+
+### 修复
+
+- **`reasoning_effort=off/none` 现在真的关闭思考**：此前 `off` 只是档位排序占位，
+  会被降级管线抬成最弱正档，表现为「要求关闭思考却仍返回思维链」。DeepSeek 系
+  改写为 `thinking.type=disabled` 并清除档位字段；其他模型清除非法档位值后透传。
+- **网关 401 不再误杀健康账号**：refresh 失败时先分辨是「上游应用层明确判词」
+  还是「边缘拦截/抖动」。只有明确判词（4xx 非 429、非 HTML 拦截页）才累计
+  session dead；HTML 401/403、5xx、429、传输错误只软冷却。chat 与搜索两条路径
+  同口径；刷新成功后仍 401 的降级凭证也不再计死。
+
+### 配置
+
+- `schedule.keepalive_refresh_window`（默认 `168h`）：周期保活的临期窗口，Go 时长
+  格式；留空回落默认，非法或 `<=0` 启动报错。面板保存后热生效。
+
 ## v1.18.0（2026-10-23）
 
 ### 新增
