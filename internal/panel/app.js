@@ -595,7 +595,7 @@ $('btnCheckinAll').onclick = async () => {
   catch (e) { toast(e.message, 'err'); }
 };
 $('btnKeepaliveAll').onclick = async () => {
-  try { await api('keepalive_all', { method: 'POST' }); toast('全部保活已开始，结果见日志', 'ok'); }
+  try { await api('keepalive_all', { method: 'POST' }); toast('全部保活已开始（刷新全部账号，不受临期窗口限制），结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 };
 $('btnTravelAll').onclick = async () => {

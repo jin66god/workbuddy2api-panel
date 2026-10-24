@@ -722,7 +722,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
-          <button class="xs" id="btnKeepaliveAll">全部保活</button>
+          <button class="xs" id="btnKeepaliveAll" title="立即刷新全部账号的 token，不受「保活临期窗口」限制">全部保活</button>
         </header>
         <div class="tbl-wrap">
         <table class="acc">
@@ -982,7 +982,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                   <input name="keepalive_hours" placeholder="22"></label>
                 <label class="fld"><span class="lb">保活临期窗口（Go 时长）</span>
                   <input name="keepalive_refresh_window" placeholder="168h">
-                  <span class="hint">仅刷新剩余有效期不超过该时长的凭证；已过期/无到期时间的账号始终刷新。留空 = 沿用现值</span></label>
+                  <span class="hint">每日排程只刷新剩余有效期不超过该时长的凭证；已过期/无到期时间的账号始终刷新。上方「全部保活」按钮不受此限制，始终刷新全部账号。留空 = 沿用现值</span></label>
               </div>
             </div>
             <div class="hr"></div>
