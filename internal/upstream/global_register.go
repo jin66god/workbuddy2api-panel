@@ -38,17 +38,16 @@ type GlobalCountry struct {
 	Code   string `json:"Code"` // 数字码（countryCode）
 }
 
-// globalRegisterBase 注册激活端点的 base（注册链路在 www.workbuddy.ai，与 globalBillingBase 同域）。
-// 独立成方法便于测试替换。
-func (c *Client) globalRegisterBase() string {
-	if c.BillingBaseGlobal != "" {
-		return c.BillingBaseGlobal
-	}
-	return defaultGlobalBase
+// globalRegisterBase 注册激活端点的 base：与 globalBillingBase 同域（按账号 domain
+// 选官方国际站 codebuddy.ai 或旧桌面端 workbuddy.ai，两域同后端）。独立成方法便于测试替换。
+func (c *Client) globalRegisterBase(a *auth.Auth) string {
+	return c.globalBillingBase(a)
 }
 
 // globalRegisterReq 注册链路通用请求构造：web 指纹 UA + Origin/Referer 同域 + Bearer。
-func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.Request, error) {
+// base 由调用方按账号 domain 传入——两域并存时 Origin/Referer 必须与目标主机同域，
+// 否则上游按跨域拒绝。
+func (c *Client) globalRegisterReq(method, url, token string, body any, base string) (*http.Request, error) {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -61,7 +60,6 @@ func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.R
 	if err != nil {
 		return nil, err
 	}
-	base := c.globalRegisterBase()
 	req.Header.Set("User-Agent", globalWebUA)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
@@ -98,7 +96,8 @@ func (c *Client) GlobalFetchCountries(a *auth.Auth, intlOnly bool) ([]GlobalCoun
 	if a == nil || a.Realm() != "global" {
 		return nil, fmt.Errorf("fetch countries: only global accounts")
 	}
-	req, err := c.globalRegisterReq(http.MethodPost, c.globalRegisterBase()+"/billing/area/get-country-code", a.AccessTokenValue(), map[string]any{"filterForbidden": 1})
+	base := c.globalRegisterBase(a)
+	req, err := c.globalRegisterReq(http.MethodPost, base+"/billing/area/get-country-code", a.AccessTokenValue(), map[string]any{"filterForbidden": 1}, base)
 	if err != nil {
 		return nil, err
 	}
@@ -149,9 +148,10 @@ func (c *Client) GlobalRegisterStatus(a *auth.Auth) (activated bool, needsRegion
 	if a == nil || a.Realm() != "global" {
 		return false, false, "", fmt.Errorf("register status: only global accounts")
 	}
+	base := c.globalRegisterBase(a)
 	req, err := c.globalRegisterReq(http.MethodGet,
-		c.globalRegisterBase()+"/auth/realms/copilot/overseas/user/register?userId="+a.UID,
-		a.AccessTokenValue(), nil)
+		base+"/auth/realms/copilot/overseas/user/register?userId="+a.UID,
+		a.AccessTokenValue(), nil, base)
 	if err != nil {
 		return false, false, "", err
 	}
@@ -180,8 +180,9 @@ func (c *Client) GlobalSubmitRegion(a *auth.Auth, country GlobalCountry) error {
 		"countryFullName": []string{country.EnName},
 		"countryName":     []string{country.IOS2},
 	}
-	req, err := c.globalRegisterReq(http.MethodPost, c.globalRegisterBase()+"/console/login/account",
-		a.AccessTokenValue(), map[string]any{"attributes": attrs})
+	base := c.globalRegisterBase(a)
+	req, err := c.globalRegisterReq(http.MethodPost, base+"/console/login/account",
+		a.AccessTokenValue(), map[string]any{"attributes": attrs}, base)
 	if err != nil {
 		return err
 	}

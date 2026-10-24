@@ -23,6 +23,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/loginsite"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -866,21 +867,35 @@ func (c *Client) chatHTTP() *http.Client {
 	return c.HTTP
 }
 
-// defaultGlobalBase 缺省 global base（D5：config 未覆盖时默认 workbuddy.ai）。
-const defaultGlobalBase = "https://www.workbuddy.ai"
+// defaultGlobalBase 缺省 global base（config 未覆盖、且 auth 文件未写 domain 时的兜底）。
+// 保持旧桌面端 workbuddy.ai：既有账号的 auth 文件都带 domain，会走 BaseForDomain；
+// 只有手写扁平凭据（无 domain）落到这里，改成 codebuddy.ai 会把它们打到非签发域。
+const defaultGlobalBase = loginsite.BaseWorkBuddy
 
-// globalChatBase 生效的 global chat base：Client.ChatBaseGlobal 非空取之，否则默认。
-func (c *Client) globalChatBase() string {
+// globalChatBase 生效的 global chat base，优先级：
+//
+//	config ChatBaseGlobal > auth 文件 domain 推出的官方主机 > defaultGlobalBase
+//
+// 按 domain 而不是按 realm 决定主机：国际域有两套主机名并存（老账号
+// workbuddy.ai、官方 CLI 新登录 codebuddy.ai），只按 realm 会把一半账号打到
+// 非其签发域。domain 为空（手写扁平 auth）才回落默认。
+func (c *Client) globalChatBase(a *auth.Auth) string {
 	if c.ChatBaseGlobal != "" {
 		return c.ChatBaseGlobal
+	}
+	if b := loginsite.BaseForDomain(a.DomainValue()); b != "" {
+		return b
 	}
 	return defaultGlobalBase
 }
 
-// globalBillingBase 生效的 global billing base：Client.BillingBaseGlobal 非空取之，否则默认。
-func (c *Client) globalBillingBase() string {
+// globalBillingBase 生效的 global billing base（优先级同 globalChatBase）。
+func (c *Client) globalBillingBase(a *auth.Auth) string {
 	if c.BillingBaseGlobal != "" {
 		return c.BillingBaseGlobal
+	}
+	if b := loginsite.BaseForDomain(a.DomainValue()); b != "" {
+		return b
 	}
 	return defaultGlobalBase
 }
@@ -933,7 +948,7 @@ func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
 
 func (c *Client) chatBase(a *auth.Auth) string {
 	if c.globalOn(a) {
-		return c.globalChatBase()
+		return c.globalChatBase(a)
 	}
 	return c.ChatBaseCN
 }
@@ -1013,16 +1028,17 @@ func realmKey(realm string) string {
 
 func (c *Client) billingBase(a *auth.Auth) string {
 	if c.globalOn(a) {
-		return c.globalBillingBase()
+		return c.globalBillingBase(a)
 	}
 	return c.BillingBaseCN
 }
 
 // webBase 返回官网域（任务领奖类接口；未注入时回落默认）。
-// realm 感知：global 账号切国际站 workbuddy.ai，CN 用 workbuddy.cn。
+// realm 感知：global 账号按 domain 走对应国际站主机（codebuddy.ai / workbuddy.ai），
+// CN 用 workbuddy.cn。
 func (c *Client) webBase(a *auth.Auth) string {
 	if c.globalOn(a) {
-		return defaultGlobalBase
+		return c.globalChatBase(a)
 	}
 	if c.WebBaseCN != "" {
 		return c.WebBaseCN

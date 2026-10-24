@@ -1350,10 +1350,10 @@ document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
 });
 function startAddLogin() {
-  const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
+  const site = (document.querySelector('input[name="addSite"]:checked') || {}).value || 'cn';
   $('btnStartLogin').disabled = true;
   $('addLoad').hidden = false; $('addErr').hidden = true;
-  api('login/start', { method: 'POST', body: JSON.stringify({ realm }) }).then(r => {
+  api('login/start', { method: 'POST', body: JSON.stringify({ site }) }).then(r => {
     loginState = r.state;
     $('addUrl').textContent = r.url;
     $('addPick').hidden = true; // 选域锁定（会话已按该域发起）
@@ -1377,8 +1377,16 @@ async function pollLogin() {
       stopPoll();
       $('addReady').hidden = true;
       $('addDone').hidden = false;
-      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
+      const siteLabel = r.site === 'intl' ? '（国际站）' : r.site === 'workbuddy' ? '（国际旧版）' : r.realm === 'global' ? '（国际版）' : '';
+      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + siteLabel + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
       setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
+    } else if (r.fatal) {
+      // 终态许可错误（席位满 / 许可证过期 / 试用到期）：上游已给出明确码与文案，
+      // 停止轮询并原样展示，不再空转到会话 TTL。
+      stopPoll();
+      $('addReady').hidden = true;
+      $('addErr').hidden = false;
+      $('addErr').textContent = (r.message || '登录被上游拒绝') + '（code ' + r.code + '，请处理后重新发起）';
     }
   } catch (e) {
     stopPoll();

@@ -28,7 +28,38 @@ echo "  WorkBuddy OAuth 登录"
 echo "============================================================"
 echo ""
 
-AUTH_URL=$("$LOGIN_BIN" url)
+# 站点选择（官方域表）：--site=cn|intl|workbuddy；--realm=global 保留为兼容写法
+# （映射到旧桌面端 workbuddy.ai，与升级前语义一致）。
+SITE="cn"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --site)
+            shift; SITE="${1:-}"; shift || true ;;
+        --site=*)
+            SITE="${1#*=}"; shift ;;
+        --realm)
+            shift; [[ "${1:-}" == "global" ]] && SITE="workbuddy"; shift || true ;;
+        --realm=*)
+            [[ "${1#*=}" == "global" ]] && SITE="workbuddy"; shift ;;
+        -h|--help)
+            echo "用法: ./login.sh [--site=cn|intl|workbuddy] [--realm=cn|global]"
+            echo "  cn        国内站（copilot.tencent.com / codebuddy.cn）"
+            echo "  intl      官方国际站（www.codebuddy.ai）"
+            echo "  workbuddy 旧桌面端国际版（www.workbuddy.ai）"
+            exit 0 ;;
+        *)
+            echo "未知参数: $1（可用 --site=cn|intl|workbuddy）"
+            exit 1 ;;
+    esac
+done
+case "$SITE" in
+    cn|intl|workbuddy) ;;
+    *) echo "无效站点: $SITE（可选 cn|intl|workbuddy）"; exit 1 ;;
+esac
+echo "登录站点: $SITE"
+echo ""
+
+AUTH_URL=$("$LOGIN_BIN" --site="$SITE" url)
 
 echo "请在浏览器中打开以下链接完成登录："
 echo ""
@@ -51,7 +82,7 @@ fi
 echo ""
 echo "正在获取 token..."
 
-RESULT=$("$LOGIN_BIN" poll) || {
+RESULT=$("$LOGIN_BIN" --site="$SITE" poll) || {
     echo ""
     echo "获取 token 失败。可能原因："
     echo "  - 登录还没完成就按了 y（重新运行 ./login.sh 再试）"
@@ -66,6 +97,7 @@ DOMAIN=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin
 USER_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uid',''))")
 ENT_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enterprise_id',''))")
 NICKNAME=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('nickname',''))")
+REALM=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('realm',''))")
 
 if [[ -z "$USER_ID" ]]; then
     echo "无法获取 uid，请检查 token 是否有效"
@@ -74,9 +106,11 @@ fi
 
 EXPIRES_AT=$(( $(date +%s) + EXPIRES_IN ))
 
-# ─── 签到（CN：POST codebuddy.cn/v2/billing/meter/daily-checkin，幂等不阻塞）───
+# ─── 签到（仅 CN 站点：POST codebuddy.cn/v2/billing/meter/daily-checkin，幂等不阻塞）───
+# 国际站/旧版对 CN 签到端点一律 400（不属于同一计费体系），故只在 site=cn 时发起。
 # OAuth 返回字段一律通过环境变量传入 Python，并用带引号 heredoc：
 # 昵称/domain/token 等值可含引号或换行，拼进 Python 源码会造成注入。
+if [[ "$SITE" == "cn" ]]; then
 WB2A_LOGIN_TOKEN="$TOKEN" \
 WB2A_LOGIN_USER_ID="$USER_ID" \
 WB2A_LOGIN_ENT_ID="$ENT_ID" \
@@ -118,6 +152,9 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     print(f"签到: {e}")
 PYEOF
+else
+    echo "签到: 跳过（$SITE 站点不参与 CN 签到体系）"
+fi
 
 # ─── 落盘 auth 文件（与 internal/auth 读取格式一致）─────────────────
 AUTH_FILE="$AUTH_DIR/workbuddy-${USER_ID}.json"
@@ -135,6 +172,7 @@ WB2A_LOGIN_DOMAIN="$DOMAIN" \
 WB2A_LOGIN_USER_ID="$USER_ID" \
 WB2A_LOGIN_ENT_ID="$ENT_ID" \
 WB2A_LOGIN_NICKNAME="$NICKNAME" \
+WB2A_LOGIN_REALM="$REALM" \
 WB2A_LOGIN_AUTH_FILE="$AUTH_FILE" \
 WB2A_LOGIN_ACTION="$ACTION" \
 python3 - <<'PYEOF'
@@ -151,6 +189,7 @@ auth = {
         "refreshToken": os.environ["WB2A_LOGIN_REFRESH"],
         "expiresAt": int(os.environ["WB2A_LOGIN_EXPIRES_AT"]),
         "domain": os.environ["WB2A_LOGIN_DOMAIN"],
+        "realm": os.environ.get("WB2A_LOGIN_REALM", ""),
     },
 }
 with open(os.environ["WB2A_LOGIN_AUTH_FILE"], "w") as f:
@@ -176,6 +215,7 @@ echo ""
 echo "============================================================"
 echo "  登录完成！"
 echo "  UID: $USER_ID"
+echo "  Site: $SITE"
 echo "  Nickname: ${NICKNAME:-（未获取到）}"
 echo "  Token: ${TOKEN:0:30}..."
 echo "  有效期: $(date -d "@$EXPIRES_AT" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$EXPIRES_AT")"

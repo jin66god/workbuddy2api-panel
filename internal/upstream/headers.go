@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/loginsite"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
@@ -28,10 +29,14 @@ const (
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
 
-// originRefererFor 按账号 realm 返回 Origin/Referer 基础域：
-// global → https://www.workbuddy.ai；cn（含全局开关未开）→ https://www.codebuddy.cn。
+// originRefererFor 按账号 realm / domain 返回 Origin/Referer 基础域：
+// global → 账号签发域（codebuddy.ai 或 workbuddy.ai，按 auth 文件 domain）；
+// cn（含全局开关未开）→ https://www.codebuddy.cn。
 func originRefererFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
+		if b := loginsite.BaseForDomain(a.DomainValue()); b != "" {
+			return b
+		}
 		return originRefererGlobal
 	}
 	return originRefererCN

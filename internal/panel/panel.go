@@ -132,10 +132,12 @@ func (p *Panel) unlockAccount(uid string) {
 // 防止"开了添加账号弹窗就走开"的会话永久滞留。
 const loginTTL = 15 * time.Minute
 
-// loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点切换）。
+// loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点
+// 切换）+ site（cn/intl/workbuddy，用于 poll 时取端点，防同一 state 换站）。
 type loginSession struct {
 	created time.Time
 	realm   string // "cn" / "global"，缺省 cn
+	site    string // "cn" / "intl" / "workbuddy"，空 = 按 realm 回落旧行为
 }
 
 // New 构建面板。

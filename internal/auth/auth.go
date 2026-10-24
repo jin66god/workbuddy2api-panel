@@ -318,11 +318,16 @@ func jwtTokenSource(token string) string {
 	return payload.TokenSource
 }
 
-// isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
-// 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
+// isGlobalDomain 判定 domain 是否指向国际站域。
+// 接受 workbuddy.ai（旧桌面端）与 codebuddy.ai（官方 CLI 国际站）两套裸域及子域。
+// 官方 CLI 的新登录把 domain 落成 www.codebuddy.ai；不认它会把国际站账号误判成
+// cn 并打到 copilot.tencent.com（错域 401）。
 func isGlobalDomain(d string) bool {
 	d = strings.ToLower(strings.TrimSpace(d))
-	return d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai")
+	if d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai") {
+		return true
+	}
+	return d == "codebuddy.ai" || strings.HasSuffix(d, ".codebuddy.ai")
 }
 
 // NeedsRefresh 报告 token 是否将在 within 内过期（或已过期/无 expiry）。
