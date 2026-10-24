@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,9 +37,12 @@ import (
 // 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
 // （base 与 Origin/Referer 同域）。端点 URL 由 realmConfig 按 realm 动态拼出，不再硬编码。
 const (
-	upstreamBaseCN      = "https://copilot.tencent.com"
-	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	upstreamBaseCN     = "https://copilot.tencent.com"
+	upstreamBaseGlobal = "https://www.workbuddy.ai"
+	// clientVersion 官方 CodeBuddy CLI 版本（UA 与授权链接 version 参数同源）。
+	// 只作用于登录链路；chat 侧 UA 按账号身份分档，两者不同源。
+	clientVersion       = "2.174.0"
+	clientUA            = "CLI/" + clientVersion + " CodeBuddy/" + clientVersion
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
@@ -222,7 +226,22 @@ func runURL(base, origin, realm, statePath string, client *http.Client, out io.W
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		fatal("write state: %v", err)
 	}
-	fmt.Fprintln(out, st.AuthURL)
+	fmt.Fprintln(out, decorateAuthURL(st.AuthURL))
+}
+
+// decorateAuthURL 按官方 CLI 行为给授权链接补 version 参数。已带则保持原值；
+// 解析失败原样返回，不阻断登录。
+func decorateAuthURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	if q.Get("version") == "" {
+		q.Set("version", clientVersion)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // runPoll 执行 poll 子命令：读 state 文件（realm 校验），向 upstreamBase 的 token 端点

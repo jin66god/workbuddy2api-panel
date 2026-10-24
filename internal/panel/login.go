@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,12 +25,32 @@ import (
 )
 
 const (
-	upstreamBaseCN      = "https://copilot.tencent.com"
-	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	upstreamBaseCN     = "https://copilot.tencent.com"
+	upstreamBaseGlobal = "https://www.workbuddy.ai"
+	// clientVersion 官方 CodeBuddy CLI 版本：登录链路 UA 与授权链接 version 参数同源。
+	// 对齐 2026-10-24 的 @tencent-ai/codebuddy-code@2.174.0；官方登录页按 version 做
+	// 灰度与埋点，写旧版本可能拿到旧登录页。只作用于登录链路，chat 侧 UA 另按账号
+	// 身份分档（见 upstream/headers.go），两者不同源、不要合并。
+	clientVersion       = "2.174.0"
+	clientUA            = "CLI/" + clientVersion + " CodeBuddy/" + clientVersion
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
+
+// decorateAuthURL 按官方 CLI 行为给授权链接补 version 参数（对应官方
+// appendAuthUrlParams）。已带 version 时保持原值；解析失败原样返回，不阻断登录。
+func decorateAuthURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	if q.Get("version") == "" {
+		q.Set("version", clientVersion)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
 
 // loginEndpoints 按 realm 返回设备授权三端点（auth/state、token、account）+ Origin。
 // realm=="global" → 国际版（workbuddy.ai 同域）；cn/非法/缺省 → CN（零回归）。
@@ -141,6 +162,8 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "auth state: missing state or authUrl")
 		return
 	}
+	// 对齐官方 CLI：授权链接补 version 参数（官方登录页按它做灰度）。
+	st.AuthURL = decorateAuthURL(st.AuthURL)
 	p.loginMu.Lock()
 	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
 	for s, sess := range p.logins {

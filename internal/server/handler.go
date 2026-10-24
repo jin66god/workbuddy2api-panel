@@ -1333,13 +1333,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			// issue #44：上游会给「声明了 tools、零 tool_calls、finish_reason=stop」的
 			// 合法终态，客户端据此把回合当成正常完成、工具一次没跑、任务静默停住。
-			// 网关侧此前完全无痕，排障只能靠客户端抓帧。这里只记一行 WARN：
+			// 网关侧此前完全无痕，排障只能靠客户端抓帧。这里只记一行 INFO：
 			// 不改流、不改状态码、不改 usage——模型「判断这轮不需要工具」是合法行为，
+			// 记 WARN 会让日志巡检把它当异常。
 			// 改写成可重试错误会让正常回合反复重试、每次都真实计费。
 			// 反例边界：没声明 tools 的纯对话出现 stop 完全正常，故必须带 len>0。
 			if repair.Converted() == 0 && len(declaredTools) > 0 && stats.ToolCalls() == 0 &&
 				stats.FinishReason() == "stop" && !stats.SawErrorFrame() {
-				log.Printf("WARN: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (silent stop; client may treat the turn as complete)",
+				log.Printf("INFO: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (本轮无工具调用，正常收尾)",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools))
 			}
 			st.ttfb = stats.TTFB()

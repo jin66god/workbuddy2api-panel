@@ -414,7 +414,28 @@ func Parse(raw []byte) (*Auth, error) {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
+	a.ExpiresAt = normalizeExpiresAt(a.ExpiresAt)
 	return &a, nil
+}
+
+// expiresAtMillisThreshold 区分「秒」与「毫秒」时间戳的分界（1e11）。
+//
+// 1e11 秒已是公元 5138 年，真实凭证不可能；而 1e11 毫秒 = 1973 年，毫秒制当前值
+// （约 1.8e12）远在其上。阈值取在两者之间不会误判任一侧。
+const expiresAtMillisThreshold = 100_000_000_000
+
+// normalizeExpiresAt 把上游凭据的 expiresAt 归一到 Unix 秒。
+//
+// 为什么需要：官方 CodeBuddy CLI 的凭据文件写的是**毫秒**（实测 1795254516410），
+// 而本仓与旧插件 OAuth 落盘的是**秒**。直接按秒解释毫秒会把到期时间推到公元
+// 58800 年 → NeedsRefresh 恒 false → token 永不刷新 → 到期后账号静默失效
+// （表现为「用了一个月突然全部 401」）。导入官方凭据是本仓支持的用法，所以解析
+// 入口必须归一，而不是靠使用者手改文件。
+func normalizeExpiresAt(v int64) int64 {
+	if v > expiresAtMillisThreshold {
+		return v / 1000
+	}
+	return v
 }
 
 // SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。

@@ -270,6 +270,15 @@ func SoftRateResetLoc() *time.Location { return softRateResetLoc }
 // 而不是账号整体被限流——账号健康，只是这个模型此刻被限（issue #31）。
 const modelRateLimitCode = "6004"
 
+// modelUsageLimitCode 上游「用量频率限制」的业务码（2026-10 实测出现在 kimi 系）。
+// 与 6004 同属模型级——msg 明确写「您也可以切换其他模型继续使用」——但 code 不同，
+// 只收进 modelRateLimitCode 会连账号级 6000 一起放宽，故单独判定：code 6000 且
+// 文案命中 modelSwitchModelHint 才按模型级处理。
+const modelUsageLimitCode = "6000"
+
+// modelSwitchModelHint 官方在模型级用量限流答复里给出的换模型提示语。
+const modelSwitchModelHint = "切换其他模型"
+
 // softRateResetPatternCN/EN 匹配重置文案（CN「将在 … 重置」/ global 域英文
 // "reset at <固定格式时间>"），捕获中间的时间串。
 const softRateResetPatternCN = `将在 (.+?) 重置`
@@ -280,6 +289,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
 	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelUsageLimit = regexp.MustCompile(`"code"\s*:\s*"?` + modelUsageLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -287,11 +297,16 @@ var (
 // softRateTimeLayout 上游重置时间的格式（无时区后缀；时区固定 UTC+8）。
 const softRateTimeLayout = "2006-01-02 15:04:05"
 
-// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004）。
-// 用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
+// IsModelRateLimit 报告 429 body 是否明确指向模型级限流（业务 code 6004 / 带换模型
+// 提示的 6000）。用于区分"账号级软限流"（按账号冷却）与"模型级用量限流"（切模型即可用）。
 func IsModelRateLimit(body string) bool {
 	// `"code":6004` / `"code": 6004` / `"code":"6004"` 均可命中（JSON 空格容差）。
-	return reModelRateLimit.MatchString(body)
+	if reModelRateLimit.MatchString(body) {
+		return true
+	}
+	// 6000 需要文案佐证：官方在「单模型用量超限」时会写「您也可以切换其他模型继续使用」，
+	// 真正的账号级限制不会这么提示。只凭 code 放宽会把整号受限误判成模型级。
+	return reModelUsageLimit.MatchString(body) && strings.Contains(body, modelSwitchModelHint)
 }
 
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
