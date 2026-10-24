@@ -898,3 +898,18 @@ func TestKeepaliveRefreshWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestExampleConfigLoads 直接解析仓库根的 config.example.json：防止示例配置出现
+// 语法错误（历史上有过漏逗号）或新增字段与 normalize 不一致。
+func TestExampleConfigLoads(t *testing.T) {
+	cfg, err := Load("../../config.example.json")
+	if err != nil {
+		t.Fatalf("config.example.json 无法加载: %v", err)
+	}
+	if cfg.Schedule.KeepaliveRefreshWindow != "168h" {
+		t.Errorf("example keepalive_refresh_window=%q want 168h", cfg.Schedule.KeepaliveRefreshWindow)
+	}
+	if cfg.KeepaliveRefreshWindowDur != 168*time.Hour {
+		t.Errorf("example dur=%v want 168h", cfg.KeepaliveRefreshWindowDur)
+	}
+}
