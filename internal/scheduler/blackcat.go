@@ -26,7 +26,7 @@ func (s *Scheduler) runBlackcat(spread bool) {
 		log.Printf("blackcat: 当前不在 23:00–08:00 计数窗口，跳过")
 		return
 	}
-	list := s.cfg.Pool.List()
+	list := capByCredits(s.cfg.Pool.List(), s.NightAccountCap())
 	var plan *spreadPlan
 	if spread {
 		uids := make([]string, 0, len(list))

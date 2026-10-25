@@ -136,6 +136,21 @@ type Config struct {
 		// 只做 accept/claim 两条幂等请求，不跑任何行为链路；分钟级开销可忽略。
 		TaskSweepEnabled bool `json:"task_sweep_enabled"` // 缺省 true；false = 关闭
 		TaskSweepMinutes int  `json:"task_sweep_minutes"` // 缺省 15；<=0 回落 15
+
+		// 周期抖动（人味化，anti-fingerprint）：>0 时余额刷新/补领清扫的每轮间隔
+		// 在 ±（值/1000）×基准间隔内随机偏移，不再精确固定间隔打卡；余额刷新
+		// 另把账号遍历摊开到同量级窗口内（见 internal/scheduler/humanize.go）。
+		// 0 = 关闭（旧行为：精确 interval ticker + 全账号并发齐射）。上限 500 = 50%。
+		// 例：balance_refresh_minutes=5 + 200 → 实际间隔在 3–7 分钟之间抖。
+		BalanceRefreshJitterPermill int `json:"balance_refresh_jitter_permill"` // 缺省 0；0–500
+		TaskSweepJitterPermill      int `json:"task_sweep_jitter_permill"`      // 缺省 0；0–500
+
+		// 夜间参与上限（人味化）：夜猫子（23:00–08:00 真实模型对话）等夜间任务的
+		// 参与账号收窄为积分最高的前 N 个，0 = 不限（旧行为全池参加）。背景：
+		// 深夜全池 12 个号在同一出口 IP 齐做真实对话，是最好认的机器人形状；真人
+		// 不会全部账号都在夜里有活动。夜猫子是唯一「整任务都是真实模型对话」的
+		// 任务，指纹最重，故只收窄它；白天任务（签到/旅行/成长）仍全池保号。
+		NightAccountCap int `json:"night_account_cap"` // 缺省 0（不限）；>0 = Top-N 按积分
 	} `json:"schedule"`
 
 	Global struct {
@@ -321,6 +336,12 @@ func Default() *Config {
 	c.Schedule.KeepaliveRefreshWindow = "168h"
 	c.Schedule.BlackcatHours = []int{23}
 	c.Schedule.GrowthHours = []int{1}
+	// 分钟级周期任务的人味化抖动默认 ±15%：余额刷新（5 分钟基准）落在 255~345s、
+	// 补领清扫（15 分钟基准）落在 765~1035s，不再按整点节拍全池齐射——同出口 IP 上
+	// 「精确每 5 分钟全账号同时刷新」是最容易识别的机器人形状（上游 11140 复盘）。
+	// 显式写 0 即关闭（恢复旧的固定间隔）。夜猫子参与上限默认 0 = 不限。
+	c.Schedule.BalanceRefreshJitterPermill = 150
+	c.Schedule.TaskSweepJitterPermill = 150
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
 	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
 	c.Schedule.CheckinEnabled = true
@@ -515,6 +536,31 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
 		c.Pool.ExpiringSoon = v
 	}
+	if v := os.Getenv("WB2A_SCHEDULE_ACCOUNT_SPREAD_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.AccountSpreadMinutes = n
+		}
+	}
+	if v := os.Getenv("WB2A_SCHEDULE_ACCOUNT_SPREAD_MIN_GAP_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.AccountSpreadMinGapSeconds = n
+		}
+	}
+	if v := os.Getenv("WB2A_SCHEDULE_BALANCE_REFRESH_JITTER_PERMILL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.BalanceRefreshJitterPermill = n
+		}
+	}
+	if v := os.Getenv("WB2A_SCHEDULE_TASK_SWEEP_JITTER_PERMILL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.TaskSweepJitterPermill = n
+		}
+	}
+	if v := os.Getenv("WB2A_SCHEDULE_NIGHT_ACCOUNT_CAP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.NightAccountCap = n
+		}
+	}
 	if v := os.Getenv("WB2A_PREFER_EXPIRING"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Pool.PreferExpiring = b
@@ -686,6 +732,16 @@ func (c *Config) normalize() error {
 			c.Schedule.TaskSweepMinutes = 15
 		}
 		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
+	}
+	// 抖动合法性（上限 50%）：非法值直接报错而非静默钳位——配置错误该在启动时暴露。
+	if c.Schedule.BalanceRefreshJitterPermill < 0 || c.Schedule.BalanceRefreshJitterPermill > 500 {
+		return fmt.Errorf("schedule.balance_refresh_jitter_permill: %d 非法（0 = 关闭，上限 500）", c.Schedule.BalanceRefreshJitterPermill)
+	}
+	if c.Schedule.TaskSweepJitterPermill < 0 || c.Schedule.TaskSweepJitterPermill > 500 {
+		return fmt.Errorf("schedule.task_sweep_jitter_permill: %d 非法（0 = 关闭，上限 500）", c.Schedule.TaskSweepJitterPermill)
+	}
+	if c.Schedule.NightAccountCap < 0 {
+		return fmt.Errorf("schedule.night_account_cap: %d 非法（0 = 不限，>0 = Top-N）", c.Schedule.NightAccountCap)
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err

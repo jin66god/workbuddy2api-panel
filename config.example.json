@@ -34,6 +34,9 @@
     "keepalive_hours": [22],
     "keepalive_refresh_window": "168h",
     "blackcat_hours": [23],
+    "balance_refresh_jitter_permill": 150,
+    "task_sweep_jitter_permill": 150,
+    "night_account_cap": 0,
     "checkin_enabled": true,
     "growth_enabled": true,
     "travel_enabled": true,
@@ -42,7 +45,10 @@
     "blackcat_enabled": true,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5,
-    "include_disabled_in_tasks": false
+    "include_disabled_in_tasks": false,
+    "balance_refresh_jitter_permill": 0,
+    "task_sweep_jitter_permill": 0,
+    "night_account_cap": 0
   },
   "global": {
     "enabled": true,

@@ -913,3 +913,39 @@ func TestExampleConfigLoads(t *testing.T) {
 		t.Errorf("example dur=%v want 168h", cfg.KeepaliveRefreshWindowDur)
 	}
 }
+
+func TestPeriodicJitterPermillConfig(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":"k","schedule":{"balance_refresh_jitter_permill":200,"task_sweep_jitter_permill":300}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.BalanceRefreshJitterPermill != 200 || c.Schedule.TaskSweepJitterPermill != 300 {
+		t.Fatalf("c.Schedule=%+v", c.Schedule)
+	}
+
+	// 超上限拒绝（上限 500 = 50%）。
+	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":"k","schedule":{"balance_refresh_jitter_permill":501}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for jitter_permill > 500")
+	}
+
+	// 负数拒绝。
+	os.WriteFile(fp, []byte(`{"listen":":9999","api_key":"k","schedule":{"task_sweep_jitter_permill":-1}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for negative jitter_permill")
+	}
+
+	// env 覆盖。
+	t.Setenv("WB2A_SCHEDULE_BALANCE_REFRESH_JITTER_PERMILL", "250")
+	t.Setenv("WB2A_SCHEDULE_TASK_SWEEP_JITTER_PERMILL", "100")
+	c2, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Schedule.BalanceRefreshJitterPermill != 250 || c2.Schedule.TaskSweepJitterPermill != 100 {
+		t.Fatalf("env override: %+v", c2.Schedule)
+	}
+}
