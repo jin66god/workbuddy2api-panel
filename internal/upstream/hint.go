@@ -95,6 +95,23 @@ const noHealthyHint = "no healthy account available in pool; check /status or re
 // NoHealthyAccountHint 本地调度错误的 gateway_hint（与 no_healthy_account code 配套）。
 func NoHealthyAccountHint() string { return noHealthyHint }
 
+// NoHealthyAccountHintForModel 本地调度错误的 gateway_hint，带 realm 感知。
+//
+// 为什么需要它：裸模型名一律按 cn 域路由（见 server.resolveModel）。池里若只有
+// 另一域的账号，选号必然失败，但固定文案 "check /status" 会把人指向一个永远健康的
+// 面板——池子没毛病，是请求落错了域，重试多少次结果都一样。此时直接把「该怎么写」
+// 告诉客户端，比让人去翻 issue 有用。
+//
+// otherRealm 为空 = 另一域也没有该模型的健康号（或模型名为空），退回固定文案，
+// 不对能力做任何断言。
+func NoHealthyAccountHintForModel(bareModel, otherRealm string) string {
+	if bareModel == "" || otherRealm == "" {
+		return noHealthyHint
+	}
+	return `model "` + bareModel + `" is only available in the ` + otherRealm +
+		` realm; retry with "` + otherRealm + `:` + bareModel + `"`
+}
+
 // FrameHintFunc 返回 SSE error 帧的 gateway_hint 判定函数（Stream 的可选参数）。
 // ctxFn 惰性求值：仅在实际撞到 error 帧才调用（正常流零开销，模型目录查询
 // 不会为每个成功请求触发）。

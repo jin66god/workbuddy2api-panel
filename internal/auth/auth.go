@@ -345,6 +345,25 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	return time.Now().Add(within).Unix() >= a.ExpiresAt
 }
 
+// AccessTokenUsable 报告「refresh token 可能已失效，但 access token 此刻仍能干活」。
+//
+// refresh token 失效与账号不可用是两件事：AT 未过期时上游 chat 仍然 200。生产实测
+// （issue #83）：29 个账号里 4 个 refresh 恒回 12153，AT 却还有 26~333 天，
+// /v2/chat/completions 全 200。把这种号按 session dead 计死，会在连续几次保活
+// （或一次预刷新失败）后永久禁用掉一个完全健康的账号——现象就是面板一片橙色
+// 「疑似登录失效」，对话却秒回。
+//
+// 判据只看 AT 是否还能用，不看上游文案（"Session doesn't have required client"
+// 只是同一次失败的措辞，同一账号重试就变成 "Invalid refresh token"），也不看 JWT 的
+// azp（实测 29 个账号 azp 全是 console，其中 25 个 plugin 源 refresh 正常）。
+//
+// 只适用于「AT 尚未被上游拒绝」的路径（保活 / 余额探测 / 发请求前的预刷新）：那里
+// refresh 失败只说明 RT 死了，AT 还能干活。chat 拿到网关 401 时 AT 已被上游拒过，
+// 那条路径仍应按 session dead 处置，不得用本方法豁免。
+func (a *Auth) AccessTokenUsable() bool {
+	return a != nil && !a.NeedsRefresh(0)
+}
+
 // Parse 兼容两种磁盘形态：
 //
 //	嵌套形 {"auth":{...},"account":{...}}  （插件 OAuth 输出）

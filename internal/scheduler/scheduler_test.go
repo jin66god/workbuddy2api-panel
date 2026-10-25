@@ -364,6 +364,10 @@ func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
 		t.Fatalf("precondition: 前 2 次不应禁用: %+v", st)
 	}
 	s.RunKeepaliveNow() // 刷新成功 → 清计数
+	// 刷新成功后拿到的 AT 有效期 1h，按新判据（AT 仍有效 = 账号还能用）这期间
+	// 不再累计 12153；这里把 AT 标成已过期，模拟「新 token 也过期了」的下一轮，
+	// 继续验证计数语义本身。
+	a.ExpiresAt = 1
 	// 接下来连续 2 次 12153：从新计数重新算，仍不应禁用（历史计数已清）。
 	s.RunKeepaliveNow() // 12153 #1（新计数）
 	s.RunKeepaliveNow() // 12153 #2（新计数）

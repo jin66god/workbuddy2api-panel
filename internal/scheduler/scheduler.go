@@ -750,8 +750,17 @@ func (s *Scheduler) runKeepalive(spread, selective bool) {
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
+			// refresh token 失效 ≠ 账号不可用：AT 还没过期时 chat 仍正常（issue #83）。
+			// 这种号不计 session dead——否则连续几轮保活就会禁用掉一个还能干活的
+			// 健康号，面板却显示「疑似登录失效」。日志降到 INFO：面板错误汇总按
+			// WARN 聚合，打 WARN 会让「保活失败」一直挂在页面上。
+			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && a.AccessTokenUsable() {
+				log.Printf("INFO: keepalive %s: refresh token 已失效但 access token 仍有效，本轮跳过（对话仍可用）",
+					logfmt.Label(st.UID, st.Nickname))
+				continue
+			}
+			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
@@ -826,6 +835,14 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 					log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
 					var fe *upstream.Error
 					if errors.As(err, &fe) && (fe.Kind == upstream.ErrTokenRejected || fe.Kind == upstream.ErrSessionDead) {
+						// refresh token 失效 ≠ 账号不可用：AT 未过期时不必计死
+						// （与 keepalive 同一判据，issue #83）。计死会在连续几轮
+						// 余额刷新（每 5 分钟一轮）后禁用掉一个健康的号。
+						if fe.Kind == upstream.ErrSessionDead && a.AccessTokenUsable() {
+							log.Printf("INFO: [scheduler] balance %s: refresh token 已失效但 access token 仍有效，不计 session dead",
+								logfmt.Label(uid, a.Nickname))
+							return
+						}
 						if s.cfg.Pool.NoteSessionDead(uid) {
 							log.Printf("WARN: [scheduler] 账号 %s 连续 %d 次 token 失效 → 禁用（需重新登录）",
 								logfmt.Label(uid, a.Nickname), pool.SessionDeadThreshold())

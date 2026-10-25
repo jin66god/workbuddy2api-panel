@@ -118,11 +118,17 @@ func TestClassify(t *testing.T) {
 		{429, `{"error":{"data":{"code":6021,"msg":"queue.full.title"}}}`, ErrUpstreamBusy},
 		{429, `queue.full.title`, ErrUpstreamBusy},
 		{429, `{"code":6021,"msg":"queue full"}`, ErrUpstreamBusy},
+		// 6020「queue.waiting.title」与 6021 同族（排队等待中 / 队列已满），同判
+		// ErrUpstreamBusy。2026-10-24 实案：只认 6021 时单次 6020 就落 soft_rate，
+		// 整号 CoolSoft 600s，同号其它模型一并不可调度。
+		{429, `{"code":6020,"msg":"queue.waiting.title","requestId":"01a16e3d95b4a000e3385c807c"}`, ErrUpstreamBusy},
+		{429, `queue.waiting.title`, ErrUpstreamBusy},
 		// 文案外卡不绑 429（上游若换状态码仍须识别为渠道满载，不得落 hardMarkers 族）。
 		{500, `{"code":6021,"msg":"queue.full.title"}`, ErrUpstreamBusy},
-		// 防过宽：普通限流文案不带 queue.full，仍走软限流。
+		// 防过宽：普通限流文案不带 queue.*，仍走软限流。
 		{429, `{"code":1,"msg":"too many requests"}`, ErrSoftRate},
 		{429, `{"requestId":"6021","msg":"rate limit"}`, ErrSoftRate},
+		{429, `{"requestId":"6020","msg":"rate limit"}`, ErrSoftRate},
 		// WAF 403（P0-1）：403 + 无业务信封（无 "code":/"msg": 字段）→ ErrWafBlock。
 		// 空体 / HTML 拦截页 / 纯文本 / 非信封 JSON 均命中。
 		{403, ``, ErrWafBlock},

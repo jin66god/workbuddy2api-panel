@@ -45,7 +45,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrUpstreamBusy                  // 6021「queue.full.title」渠道级容量满载（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
+	ErrUpstreamBusy                  // 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/队列满（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
 	ErrModelBusy                     // 14003「Model busy」模型后端间歇繁忙 → 只停(账号×模型)短窗口，不罚账号、照常换号
 	ErrClient                        // 其他 4xx / 业务错误
 )
@@ -136,12 +136,13 @@ var softRateMarkers = []string{
 
 var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 
-// isQueueFullBody 判定渠道级容量满载文案（6021 queue.full.title 家族）。
-// 该形态表明上游推理集群排队队列打满，与具体账号无关；换号在任何时刻都会撞
-// 同一堵墙，正确处置是不罚号不轮转（见 Classify 的 6021 分支）。子串口径但
-// 用完整固定文案（"queue.full"），避免与普通限流文案误撞。
+// isQueueFullBody 判定渠道级排队/容量满载文案（6020 queue.waiting + 6021 queue.full 家族）。
+// 该形态表明上游推理集群正在排队或队列打满，与具体账号无关；换号在任何时刻都会撞
+// 同一堵墙，正确处置是不罚号不轮转（见 Classify 的 ErrUpstreamBusy 分支）。子串口径
+// 但用完整固定文案（"queue.full" / "queue.waiting"），避免与普通限流文案误撞。
 func isQueueFullBody(lower string) bool {
-	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
+	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full") ||
+		strings.Contains(lower, "queue.waiting")
 }
 
 // accountFaultMarkers 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
@@ -641,13 +642,15 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
 	}
-	// 6021「queue.full.title」是**渠道级容量满载**（上游推理集群排队队列打满），
-	// 不是账号问题：同一时刻换任何账号都会撞同一堵墙。必须先于通用 429 兜底，
-	// 否则会按 ErrSoftRate 逐号软冷却——实测 2 秒内即可把整池健康号全部误杀
-	// 冷却（2026-10-15 实案），且换号白撞放大请求量。429 + 结构化 code 为主判据
-	// （与 14018 同口径）；"queue.full" 固定文案单列为外卡——该文案是上游 i18n
-	// key 原文，语义唯一，非 429 状态码出现同样归本类（防上游换状态码）。
-	if (status == http.StatusTooManyRequests && hasBusinessCode(body, "6021")) || isQueueFullBody(lower) {
+	// 6020「queue.waiting.title」/ 6021「queue.full.title」是**渠道级排队/容量满载**
+	// （上游推理集群排队中或队列打满），不是账号问题：同一时刻换任何账号都会撞
+	// 同一堵墙。必须先于通用 429 兜底，否则会按 ErrSoftRate 逐号软冷却——实测 2 秒
+	// 内即可把整池健康号全部误杀冷却（2026-10-15 实案），且换号白撞放大请求量。
+	// 两个 code 同族同判（6020 排队等待中 / 6021 队列已满）：2026-10-24 实案单次 6020
+	// 就让整号 CoolSoft 600s，同号其它模型一并不可调度。429 + 结构化 code 为主判据
+	// （与 14018 同口径）；"queue.full"/"queue.waiting" 固定文案单列为外卡——该文案
+	// 是上游 i18n key 原文，语义唯一，非 429 状态码出现同样归本类（防上游换状态码）。
+	if (status == http.StatusTooManyRequests && (hasBusinessCode(body, "6020") || hasBusinessCode(body, "6021"))) || isQueueFullBody(lower) {
 		return ErrUpstreamBusy
 	}
 	// 14003「Model busy. Please switch models or retry later」是**模型后端间歇繁忙**：
