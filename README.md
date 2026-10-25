@@ -442,6 +442,9 @@ curl -s http://localhost:7863/v1/search/messages \
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点触发周期 token 保活；仅刷新临期窗口内的凭证 |
 | `schedule.keepalive_refresh_window` | `168h` | 周期保活的临期窗口：剩余有效期不超过该时长才刷新；已过期/无 expiry 仍刷新；面板「全部保活」手动入口仍全量 |
 | `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
+| `schedule.balance_refresh_jitter_permill` | `150` | 余额刷新间隔抖动（千分比，0–500）：`150` = ±15%，5 分钟基准落在 255~345s，并把各账号请求在该窗口内摊开，避免「整点全池齐射」；`0` = 固定间隔 |
+| `schedule.task_sweep_jitter_permill` | `150` | 补领清扫间隔抖动（千分比，0–500）：`150` = ±15%，15 分钟基准落在 765~1035s；`0` = 固定间隔 |
+| `schedule.night_account_cap` | `0` | 夜猫子参与上限：>0 时只让积分最高的前 N 个账号参加（其余号夜间静默），`0` = 不限；白天签到 / 旅行 / 成长仍全池 |
 | `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
@@ -810,7 +813,7 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 > `blocked_domains`（折成 `(-site:)` 拼进 query）在服务端均**静默失效**——传了不报错也
 > 不生效。本端点因此不接受这三个字段，避免调用方产生「已过滤」的错误预期。
 
-**余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
+**余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。间隔带 ±15% 稳定抖动（`schedule.balance_refresh_jitter_permill`，缺省 `150`），并把各账号请求在抖动窗口内摊开：同出口 IP 上「精确每 5 分钟全池同时刷新」是最容易识别的机器人形状。
 
 ## Web 管理面板
 
@@ -864,7 +867,7 @@ http://127.0.0.1:7863/panel/
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔/保活临期窗口）**立即生效，无需重启**；
+`models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔/抖动/夜间参与上限/保活临期窗口）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。

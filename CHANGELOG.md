@@ -3,6 +3,33 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.20.2（2026-10-25）
+
+### 修复
+
+- **6020「排队等待」不再被当成账号限流**：此前只把 6021「队列已满」判为渠道级排队，
+  6020 会落进 429 兜底、单次即整号软冷却 600s，同号其它模型一并不可调度。现在两个
+  业务码同判 `upstream_busy`（不罚号、不轮转，短等后重试）。
+- **refresh token 失效不再等同账号不可用**：access token 仍未过期时上游对话依然可用
+  （生产实测部分账号 refresh 恒回 12153、AT 还剩数十天、对话全 200）。此前发请求前的
+  预刷新失败会**一次就永久禁用**该账号；现在继续用现有 AT 服务，保活与余额刷新也不再
+  把这种号计入会话失效，AT 真正过期后仍按原语义处置。
+- **模型锁因与解锁时刻归因**：`ModelBlockStatus.Reason` 改为绑定最早解封的那个账号
+  （此前可能与 `Until` 来自不同账号）；模型级冷却 reason 保留上游原文，面板与
+  `gateway_hint` 能直接看到「使用量已超出频率限制，将在 … 重置」。
+
+### 改进
+
+- **裸模型名落错域时给出可操作提示**：池里只有另一域账号时，`no_healthy_account` 的
+  `gateway_hint` 改为 `model "x" is only available in the global realm; retry with "global:x"`，
+  不再只让人去查永远健康的 `/status`。
+- **周期任务人味化**：余额刷新与补领清扫的间隔在 ±15% 内稳定偏移（余额刷新 255~345s、
+  清扫 765~1035s），余额刷新同时把各账号请求在窗口内摊开，消除「整点全池齐射」的机械
+  节拍。`schedule.balance_refresh_jitter_permill` / `schedule.task_sweep_jitter_permill`
+  默认 `150`（写 `0` 恢复固定间隔），面板「配置 → 排程」可直接改。
+- **夜间任务参与上限**：`schedule.night_account_cap`（默认 `0` = 不限）>0 时夜猫子只让
+  积分最高的前 N 个账号参加，其余号夜里静默；白天签到 / 旅行 / 成长仍全池参与。
+
 ## v1.20.1（2026-10-24）
 
 ### 文档
