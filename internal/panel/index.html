@@ -1283,14 +1283,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnLogExport">导出</button>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
-        <div style="margin:0 0 10px">
-          <h3 style="font-size:13px;margin:0 0 6px">错误汇总 <span style="font-weight:400;color:var(--ink-3);font-size:12px">按账号 × 类型聚合，最该看的排最前（bad → warn → info，次数降序）</span></h3>
-          <div style="overflow:auto;max-height:220px">
-            <table class="tbl" style="width:100%;border-collapse:collapse;font-size:12px">
-              <thead><tr><th style="text-align:left">账号</th><th style="text-align:left">类型</th><th>次数</th><th>最近</th><th style="text-align:left">样本</th></tr></thead>
-              <tbody id="errSumBody"><tr><td colspan="5" style="color:var(--ink-3);padding:10px">加载中…</td></tr></tbody>
+        <div style="margin:0 0 10px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface-2)">
+          <h3 style="font-size:12.5px;margin:0 0 6px">错误汇总 <span style="font-weight:400;color:var(--ink-3);font-size:11.5px">账号 × 类型，bad → warn → info</span></h3>
+          <div style="overflow:auto;max-height:132px">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <tbody id="errSumBody"><tr><td colspan="5" style="color:var(--ink-3);padding:6px">加载中…</td></tr></tbody>
             </table>
           </div>
+        </div>
+
         </div>
         <pre id="logBox"></pre>
       </div>
@@ -1384,12 +1385,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <!-- 浏览器登录 -->
       <div id="addTabLogin" class="tab-panel">
         <div id="addPick">
-          <div class="realm-row">
-            <span class="hint" style="font-size:12px;flex-basis:100%">站点：</span>
-            <label class="realm-opt"><input type="radio" name="addSite" value="cn" checked> 国内版（workbuddy.cn）</label>
-            <label class="realm-opt"><input type="radio" name="addSite" value="intl"> 国际版（codebuddy.ai）</label>
-            <label class="realm-opt"><input type="radio" name="addSite" value="workbuddy"> 国际版（旧桌面端 workbuddy.ai）</label>
-            <div class="hint" style="font-size:12px;flex-basis:100%;line-height:1.6;margin-top:2px">国际版登录后，网关自动完成注册地区、激活与试用额度领取，全程无需手动操作；三个站点各自独立签发 token，登录哪个站点就只在该站点可用（网关按凭据里的 domain 自动选主机）。「国际版（旧桌面端）」仅用于已注册在 workbuddy.ai 的老账号，新账号请选国际版。国内版：对话 www.workbuddy.cn，登录页 copilot.tencent.com。</div>
+          <div class="realm-row" style="display:flex;flex-wrap:nowrap;align-items:center;gap:10px;padding:4px 0 8px">
+            <span class="hint" style="font-size:12px;white-space:nowrap;flex:none">站点：</span>
+            <label class="realm-opt" style="white-space:nowrap;flex:none"><input type="radio" name="addSite" value="cn" checked> 国内版（workbuddy.cn）</label>
+            <label class="realm-opt" style="white-space:nowrap;flex:none"><input type="radio" name="addSite" value="intl"> 国际版（codebuddy.ai）</label>
+            <label class="realm-opt" style="white-space:nowrap;flex:none"><input type="radio" name="addSite" value="workbuddy"> 国际版（旧桌面端）</label>
+          </div>
+          <div class="hint" style="font-size:11.5px;line-height:1.5;margin:0 0 6px">国际版登录后自动完成注册地区、激活与试用额度领取。旧桌面端仅用于已注册在 workbuddy.ai 的老账号。</div>
           </div>
           </div>
           </div>

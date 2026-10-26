@@ -3706,11 +3706,11 @@ async function renderErrSummary() {
       return;
     }
     tb.innerHTML = rows.map(r => '<tr>' +
-      '<td style="padding:4px 6px">' + esc(r.account || '—') + '</td>' +
-      '<td style="padding:4px 6px"><span class="tag ' + (r.sev === 'bad' ? 'bad' : r.sev === 'warn' ? 'warn' : '') + '">' + esc(r.kind) + (r.code ? ' ' + esc(r.code) : '') + '</span></td>' +
+      '<td style="padding:3px 6px;white-space:nowrap">' + esc(r.account || '—') + '</td>' +
+      '<td style="padding:3px 6px"><span class="tag ' + (r.sev === 'bad' ? 'bad' : r.sev === 'warn' ? 'warn' : '') + '">' + esc(r.kind) + (r.code ? ' ' + esc(r.code) : '') + '</span></td>' +
       '<td class="num" style="text-align:center">' + r.count + '</td>' +
       '<td class="num" style="text-align:center">' + esc(r.last || '—') + '</td>' +
-      '<td style="padding:4px 6px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td>' +
+      '<td style="padding:3px 6px;max-width:460px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td>' +
       '</tr>').join('');
   } catch (e) {
     tb.innerHTML = '<tr><td colspan="5" style="color:var(--bad);padding:10px">读取失败: ' + esc(e.message || String(e)) + '</td></tr>';
