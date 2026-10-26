@@ -889,6 +889,8 @@ async function loadLogs() {
   try {
     const [d, metrics, requestRows, credit] = await Promise.all([
       api('logs'),
+      // 错误汇总独立请求：聚合失败不影响日志正文渲染。
+      renderErrSummary(),
       api('request_metrics').catch(() => ({})),
       api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
       api('credit_history?limit=' + creditLimitValue()).catch(() => null),
@@ -3691,4 +3693,26 @@ if (logExportBtn) {
       logExportBtn.textContent = old;
     }
   };
+}
+
+/* 错误汇总：后端 /panel/api/error_summary 已按严重度+次数排好序，这里只渲染。 */
+async function renderErrSummary() {
+  const tb = $('errSumBody'); if (!tb) return;
+  try {
+    const d = await api('error_summary');
+    const rows = d.rows || [];
+    if (!rows.length) {
+      tb.innerHTML = '<tr><td colspan="5" style="color:var(--ink-3);padding:10px">暂无异常：日志里没有 WARN/ERR</td></tr>';
+      return;
+    }
+    tb.innerHTML = rows.map(r => '<tr>' +
+      '<td style="padding:4px 6px">' + esc(r.account || '—') + '</td>' +
+      '<td style="padding:4px 6px"><span class="tag ' + (r.sev === 'bad' ? 'bad' : r.sev === 'warn' ? 'warn' : '') + '">' + esc(r.kind) + (r.code ? ' ' + esc(r.code) : '') + '</span></td>' +
+      '<td class="num" style="text-align:center">' + r.count + '</td>' +
+      '<td class="num" style="text-align:center">' + esc(r.last || '—') + '</td>' +
+      '<td style="padding:4px 6px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td>' +
+      '</tr>').join('');
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="5" style="color:var(--bad);padding:10px">读取失败: ' + esc(e.message || String(e)) + '</td></tr>';
+  }
 }

@@ -1283,6 +1283,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnLogExport">导出</button>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
+        <div style="margin:0 0 10px">
+          <h3 style="font-size:13px;margin:0 0 6px">错误汇总 <span style="font-weight:400;color:var(--ink-3);font-size:12px">按账号 × 类型聚合，最该看的排最前（bad → warn → info，次数降序）</span></h3>
+          <div style="overflow:auto;max-height:220px">
+            <table class="tbl" style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead><tr><th style="text-align:left">账号</th><th style="text-align:left">类型</th><th>次数</th><th>最近</th><th style="text-align:left">样本</th></tr></thead>
+              <tbody id="errSumBody"><tr><td colspan="5" style="color:var(--ink-3);padding:10px">加载中…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
         <pre id="logBox"></pre>
       </div>
 
