@@ -28,10 +28,10 @@ func TestDecorateAuthURL(t *testing.T) {
 
 // TestLoginClientVersion UA 与 version 参数同源。
 func TestLoginClientVersion(t *testing.T) {
-	if clientVersion != "2.174.0" {
-		t.Fatalf("clientVersion=%s want 2.174.0", clientVersion)
+	if clientVersion != "2.176.0" {
+		t.Fatalf("clientVersion=%s want 2.176.0", clientVersion)
 	}
-	if clientUA != "CLI/2.174.0 CodeBuddy/2.174.0" {
+	if clientUA != "CLI/2.176.0 CodeBuddy/2.176.0" {
 		t.Errorf("clientUA=%q", clientUA)
 	}
 }

@@ -27,12 +27,12 @@ func TestDecorateAuthURL(t *testing.T) {
 	}
 }
 
-// TestLoginClientUA UA 与授权链接 version 同源，且是官方 CLI 2.174.0。
+// TestLoginClientUA UA 与授权链接 version 同源，且是官方 CLI 2.176.0。
 func TestLoginClientUA(t *testing.T) {
-	if clientVersion != "2.174.0" {
-		t.Fatalf("clientVersion=%s want 2.174.0", clientVersion)
+	if clientVersion != "2.176.0" {
+		t.Fatalf("clientVersion=%s want 2.176.0", clientVersion)
 	}
-	want := "CLI/2.174.0 CodeBuddy/2.174.0"
+	want := "CLI/2.176.0 CodeBuddy/2.176.0"
 	if clientUA != want {
 		t.Errorf("clientUA=%q want %q", clientUA, want)
 	}
