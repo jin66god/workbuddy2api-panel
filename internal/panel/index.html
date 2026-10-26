@@ -1376,12 +1376,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div id="addTabLogin" class="tab-panel">
         <div id="addPick">
           <div class="realm-row">
-            <span class="hint" style="font-size:12px">站点：</span>
-            <label class="realm-opt"><input type="radio" name="addSite" value="cn" checked> 国内版（workbuddy.cn / codebuddy.cn）</label>
+            <span class="hint" style="font-size:12px;flex-basis:100%">站点：</span>
             <label class="realm-opt"><input type="radio" name="addSite" value="intl"> 国际站（codebuddy.ai）</label>
             <label class="realm-opt"><input type="radio" name="addSite" value="workbuddy"> 国际旧版（workbuddy.ai）</label>
+            <label class="realm-opt"><input type="radio" name="addSite" value="cn" checked> 国内版（workbuddy.cn）</label>
+            <div class="hint" style="font-size:12px;flex-basis:100%;line-height:1.6;margin-top:2px">三个站点各自独立签发 token：登录哪个站点就只在该站点可用，网关按凭据里的 domain 自动选主机。国内版：对话 www.workbuddy.cn，登录页 copilot.tencent.com。国际站：登录后自动完成注册地区、激活与试用额度领取，不发起 CN 签到；国际旧版仅用于已注册在 workbuddy.ai 的老账号。</div>
           </div>
-          <div class="hint" style="font-size:12px;margin-top:2px">三个站点各自独立签发 token：登录哪个站点就只在该站点可用，网关按凭据里的 domain 自动选主机。国内版：对话 www.workbuddy.cn、登录 Origin www.codebuddy.cn、成长任务 www.workbuddy.cn；国际站登录后自动完成注册地区、激活与试用额度领取，不发起 CN 签到。</div>
         </div>
         <div id="addLoad" class="state" hidden><span class="dots">正在获取授权链接</span></div>
         <div id="addReady" hidden>
