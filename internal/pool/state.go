@@ -37,6 +37,7 @@ func (p *Pool) NoteSessionDead(uid string) bool {
 		return false
 	}
 	e.sessionDeadFails++
+	p.dirty.Store(true) // 计数必须落盘：否则重启后清零，会误杀刚自证的账号
 	if e.sessionDeadFails < sessionDeadThreshold {
 		return false
 	}
@@ -50,8 +51,9 @@ func (p *Pool) NoteSessionDead(uid string) bool {
 func (p *Pool) ClearSessionDead(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
+	if e, ok := p.byUID[uid]; ok && e.sessionDeadFails != 0 {
 		e.sessionDeadFails = 0
+		p.dirty.Store(true) // 清零同样要落盘，否则重启后旧计数复活
 	}
 }
 
