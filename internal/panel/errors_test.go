@@ -11,7 +11,7 @@ func TestKindOf(t *testing.T) {
 		{`WARN: [upstream] chat_stream acct=a(u1): upstream 500 server body=`, "上游 5xx", sevBad},
 		{`WARN: [upstream] chat_stream acct=a(u1): upstream 400 content_blocked body=`, "内容拦截", sevWarn},
 		{`WARN: keepalive 昵称(u2): refresh failed`, "保活失败", sevWarn},
-		{`WARN: 账号 x 被禁用 reason="session dead"`, "账号被禁用", sevBad},
+		{`WARN: [pool] 账号被禁用 acct=x(u1) reason="session dead"（终态，需人工恢复）`, "账号被禁用", sevBad},
 		{`WARN: [server] cache miss: model=m 本次大前缀未命中`, "前缀缓存未命中", sevInfo},
 		{`INFO: 完全正常的一行`, "", ""},
 	}

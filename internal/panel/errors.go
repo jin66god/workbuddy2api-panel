@@ -105,7 +105,7 @@ func kindOf(line string) (kind, code, sev string) {
 		kind, sev = "上游空流", sevWarn
 	case strings.Contains(line, "cache miss"):
 		kind, sev = "前缀缓存未命中", sevInfo
-	case strings.Contains(line, "账号被禁用"):
+	case strings.Contains(line, "被禁用"):
 		kind, sev = "账号被禁用", sevBad
 	case strings.Contains(line, "熔断触发"):
 		kind, sev = "熔断出池", sevWarn
