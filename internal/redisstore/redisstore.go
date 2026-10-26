@@ -241,19 +241,43 @@ func (u *Upstash) LoadState() ([]byte, bool) {
 	return v, true
 }
 
-// LoadBinds 全量读取粘性会话绑定（SCAN bind:* 前缀）。
+// LoadBinds 全量读取粘性会话绑定（SCAN bind:* 前缀 + 分批 MGET）。
+//
+// 此前逐 key GET 是 N+1 次公网往返：Upstash RTT 50~300ms，几百条绑定必然撞上
+// readTimeout 的 3s 总限、被静默截断——冷启动粘性恢复恢复了多少全凭运气，且无
+// 任何日志。改为 SCAN 只收键、按 100 一批 MGET，把往返收敛为常数次。
 func (u *Upstash) LoadBinds() map[string]string {
 	out := map[string]string{}
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
+	var keys []string
 	iter := u.client.Scan(ctx, 0, bindPrefix+"*", 200).Iterator()
 	for iter.Next(ctx) {
-		key := iter.Val()
-		v, err := u.client.Get(ctx, key).Result()
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("[redisstore] WARN: SCAN 绑定键失败（粘性恢复不完整）: %v", err)
+	}
+	for i := 0; i < len(keys); i += 100 {
+		end := i + 100
+		if end > len(keys) {
+			end = len(keys)
+		}
+		vals, err := u.client.MGet(ctx, keys[i:end]...).Result()
 		if err != nil {
+			log.Printf("[redisstore] WARN: MGET 绑定批次失败（跳过 %d 条）: %v", end-i, err)
 			continue
 		}
-		out[strings.TrimPrefix(key, bindPrefix)] = v
+		for j, v := range vals {
+			s, _ := v.(string)
+			if s == "" {
+				continue
+			}
+			out[strings.TrimPrefix(keys[i+j], bindPrefix)] = s
+		}
+	}
+	if len(out) < len(keys) {
+		log.Printf("[redisstore] WARN: 粘性绑定恢复不完整: 恢复 %d / 发现 %d", len(out), len(keys))
 	}
 	return out
 }

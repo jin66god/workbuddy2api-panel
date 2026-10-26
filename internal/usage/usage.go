@@ -85,6 +85,11 @@ type Recorder struct {
 	dirty   bool
 	started time.Time
 
+	// 落盘健康度：失败时恢复 dirty（否则后续每轮 flush 直接跳过，进程崩溃丢
+	// 一整个防抖周期），并记录最近错误与连续失败轮数供面板透出。
+	persistErr      string
+	persistFailures int64
+
 	stopOnce sync.Once
 	stop     chan struct{}
 	done     chan struct{}
@@ -149,13 +154,13 @@ type Delta struct {
 	HasCredit        bool
 	ModelRate        string
 	// CacheHitTokens / CacheMissTokens 前缀缓存命中/未命中观测（issue #92）。
-	HasCacheTokens   bool
-	CacheHitTokens   int64
-	CacheMissTokens  int64
-	LatencyMs        int64
-	HasLatency       bool
-	TokensPerSecond  float64
-	HasTPS           bool
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	LatencyMs       int64
+	HasLatency      bool
+	TokensPerSecond float64
+	HasTPS          bool
 }
 
 // Add 记录一次请求尝试。
@@ -325,20 +330,51 @@ func (r *Recorder) flush(force bool) {
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		log.Printf("[usage] 序列化失败: %v", err)
+		r.markPersistFailed(err)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
 		log.Printf("[usage] 建目录失败: %v", err)
+		r.markPersistFailed(err)
 		return
 	}
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		log.Printf("[usage] 写临时文件失败: %v", err)
+		r.markPersistFailed(err)
 		return
 	}
 	if err := os.Rename(tmp, r.path); err != nil {
 		log.Printf("[usage] 原子替换失败: %v", err)
+		r.markPersistFailed(err)
+		return
 	}
+	r.markPersistOK()
+}
+
+// markPersistFailed 落盘失败：恢复 dirty 让下个 tick 继续重试，并记录错误与
+// 连续失败轮数。此前 dirty 在写盘前就被清掉、失败后不恢复，没有新请求时后续
+// 每轮 flush 直接跳过，进程崩溃即丢掉一整个防抖周期的用量数据。
+func (r *Recorder) markPersistFailed(err error) {
+	if r == nil || r.path == "" || err == nil {
+		return
+	}
+	r.mu.Lock()
+	r.dirty = true
+	r.persistErr = err.Error()
+	r.persistFailures++
+	r.mu.Unlock()
+}
+
+// markPersistOK 落盘成功：清掉错误标记（面板不再显示「已 N 轮没写成功」）。
+func (r *Recorder) markPersistOK() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.persistErr = ""
+	r.persistFailures = 0
+	r.mu.Unlock()
 }
 
 // Save 立即落盘（面板「刷新」或关闭前调用）。
@@ -482,6 +518,11 @@ type Snapshot struct {
 	WindowFrom string `json:"window_from,omitempty"`
 	WindowTo   string `json:"window_to,omitempty"`
 	Generated  string `json:"generated"`
+	// PersistLastError / PersistFailures 落盘健康度：上次失败原因与连续失败轮数。
+	// 磁盘满、目录只读等情况下用量数据会留在内存里等下次重试，面板必须能看出
+	// 「已经 N 轮没写成功」，而不是等进程重启后数据凭空消失。
+	PersistLastError string `json:"persist_last_error,omitempty"`
+	PersistFailures  int64  `json:"persist_failures,omitempty"`
 }
 
 // Window 用量统计窗口。三种口径按优先级解析（见 bounds）：
@@ -563,6 +604,7 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	for _, b := range r.buckets {
 		bs = append(bs, *b)
 	}
+	persistErr, persistFailures := r.persistErr, r.persistFailures
 	r.mu.Unlock()
 
 	var total aggAcc
@@ -675,11 +717,13 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 		ByAccount: keyed(acctAgg, func(k string) (string, string) {
 			return k, nicks[k]
 		}),
-		ByModel:         keyed(modelAgg, func(k string) (string, string) { return k, "" }),
-		CreditByAccount: creditKeyed(creditAcctAgg),
-		CreditByModel:   creditKeyed(creditModelAgg),
-		Buckets:         matched,
-		Generated:       time.Now().Format(time.RFC3339),
+		ByModel:          keyed(modelAgg, func(k string) (string, string) { return k, "" }),
+		CreditByAccount:  creditKeyed(creditAcctAgg),
+		CreditByModel:    creditKeyed(creditModelAgg),
+		Buckets:          matched,
+		Generated:        time.Now().Format(time.RFC3339),
+		PersistLastError: persistErr,
+		PersistFailures:  persistFailures,
 	}
 	for i := range snap.ByAccount {
 		snap.ByAccount[i].Realm = acctRealm[snap.ByAccount[i].Key]

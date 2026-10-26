@@ -80,10 +80,10 @@ type Event struct {
 	HasCredit        bool      `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
-	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
-	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
-	ClientIP         string    `json:"client_ip,omitempty"`
-	UserAgent        string    `json:"user_agent,omitempty"`
+	CacheHitTokens  int64  `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
@@ -530,10 +530,19 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 	// 顺序——同一秒内连续轮转写出的多个文件 mtime 经常完全相同（Linux 文件时间戳粒度粗），
 	// os.ReadDir 的字典序又会把装着最早事件的基准文件 requests-<day>.jsonl 排在
 	// requests-<day>.N.jsonl 之后；目录被整体拷贝 / 恢复备份后 mtime 更不可信。
+	// 文件级窗口短路：归档按天分片，文件名自带日期。带 From/To 的查询（面板
+	// 自定义区间、导出）没必要解析整个目录（上限 100MB，且被轮询放大）——与
+	// 查询窗口无交集的整档直接跳过。解析不出日期的文件保守参与读取。
+	//
+	// 注意：这里只做「跳过」，不改变读取顺序与排序语义——事件时间仍是唯一
+	// 权威（同一天可能有 .1/.2 轮转文件，mtime 与字典序都不可靠）。
 	var out []Event
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		if archiveFileOutsideWindow(name, filter) {
 			continue
 		}
 		rows, err := readFile(filepath.Join(w.cfg.Dir, name), filter)
@@ -548,6 +557,33 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// archiveFileOutsideWindow 报告归档文件是否整个落在查询窗口之外。
+//
+// 文件名形如 requests-2026-10-26.jsonl / requests-2026-10-26.1.jsonl，日期段
+// 就是该档覆盖的自然日 [day, day+24h)。解析不出日期（手改过名字、将来换格式）
+// 一律返回 false，让它照常参与读取——优化不能变成丢数据。
+func archiveFileOutsideWindow(name string, f Filter) bool {
+	if f.From.IsZero() && f.To.IsZero() {
+		return false
+	}
+	rest := strings.TrimPrefix(name, "requests-")
+	if len(rest) < 10 {
+		return false
+	}
+	day, err := time.ParseInLocation("2006-01-02", rest[:10], time.Local)
+	if err != nil {
+		return false
+	}
+	end := day.Add(24 * time.Hour)
+	if !f.From.IsZero() && !end.After(f.From) {
+		return true // 整档早于窗口下界
+	}
+	if !f.To.IsZero() && !day.Before(f.To) {
+		return true // 整档晚于窗口上界
+	}
+	return false
 }
 
 func readFile(path string, filter Filter) ([]Event, error) {

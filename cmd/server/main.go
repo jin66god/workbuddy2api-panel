@@ -34,7 +34,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.20.3-panel"
+const appVersion = "1.21.0-panel"
 
 // insecureKeyWarning 空 api_key = 完全不鉴权（httpauth.VerifyBearer 对空 key 恒放
 // 行），样例占位符 test_key = 人尽皆知的弱密钥；叠加非回环监听（缺省 ":7863" 绑
@@ -431,9 +431,18 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 在途请求排干窗口可配（server.shutdown_timeout，缺省 30s）：长流式 SSE
+		// 合法时长可达分钟级，固定 5s 必然把在途请求掐成连接重置。超时不再静默，
+		// 否则运维只看到客户端 502，日志里没有任何「关停放弃在途请求」的痕迹。
+		shutdownTimeout := cfg.ShutdownTimeoutDur
+		if shutdownTimeout < 0 {
+			shutdownTimeout = 0
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("WARN: 优雅关停未在 %s 内完成，在途请求被放弃: %v", shutdownTimeout, err)
+		}
 	}()
 
 	if warn := insecureKeyWarning(cfg.Listen, cfg.APIKey); warn != "" {
@@ -441,6 +450,7 @@ func main() {
 	}
 	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		p.Flush() // 监听失败时上面的信号路径不会跑：这里兜底落盘再退
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
@@ -642,6 +652,8 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb",
 		"logging.panel_log_persist_enabled", "logging.panel_log_retention_days", "logging.panel_log_max_mb", "logging.log_export_max_mb")
 	out = append(out, "server.read_timeout")
+	// 关停窗口在信号处理闭包创建时捕获（装配期），改配置需重启才生效。
+	out = append(out, "server.shutdown_timeout")
 	// prompt 设置由 handler 装配期捕获，面板保存后需重启才会用于新请求。
 	out = append(out, "prompt.mode", "prompt.file", "prompt.identity_override_enabled", "prompt.identity_override_text")
 	return out

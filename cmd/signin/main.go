@@ -115,13 +115,15 @@ func main() {
 	fmt.Printf("\ntotal=%d ok=%d already=%d fail=%d\n", len(rows), okN, alreadyN, failN)
 }
 
-// 已签判定：code 非 0 且含 "已签到"/"already"/"checkin" 等字样
+// isAlready 已签到幂等判定。判据必须窄：上游业务错误统一是 HTTP 400 + code=%d，
+// 早期版本宽匹配 "checkin" 甚至 "code=400"，任何 400（参数缺失/风控/活动未开启）
+// 都会被误判成 ALREADY，把真实失败静默掩盖成「已签到」。实测幂等码是 10001
+//（今天已签到），与文案判定并列兜底。
 func isAlready(msg string) bool {
 	s := strings.ToLower(msg)
 	return strings.Contains(s, "已签到") ||
 		strings.Contains(s, "already") ||
-		strings.Contains(s, "checkin") ||
-		strings.Contains(s, "code=400")
+		strings.Contains(s, "code=10001")
 }
 
 func trunc(s string, n int) string {

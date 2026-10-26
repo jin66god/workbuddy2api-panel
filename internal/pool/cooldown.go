@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
 func (p *Pool) SetCredits(uid string, credits, total int64) {
@@ -579,6 +581,9 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.fails = 0
 	e.retryCount++
 	e.breakerUntil = time.Now().Add(d)
+	// 熔断是「临时出池」，零日志时只能靠面板轮询发现；留 WARN 带上退避与轮次。
+	log.Printf("WARN: [pool] 熔断触发 acct=%s until=%s（退避 %s，第 %d 轮）——账号临时出池，期间不参与选号",
+		logfmt.Label(e.a.UID, e.a.Nickname), e.breakerUntil.Format(time.RFC3339), d, e.retryCount)
 }
 
 // CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。

@@ -64,6 +64,10 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// ShutdownTimeout 优雅关停窗口（SIGTERM / 容器更新时，等在途请求排干的
+		// 时限）。长流式 SSE 合法时长可达分钟级，旧实现的固定 5s 必然把在途请求
+		// 掐成连接重置。缺省 "30s"；"0" = 不等待直接退。改动需重启进程。
+		ShutdownTimeout string `json:"shutdown_timeout"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -303,6 +307,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// ShutdownTimeoutDur 解析后的优雅关停窗口；0 = 不等待在途请求直接退。
+	ShutdownTimeoutDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -316,6 +322,7 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
+	c.Server.ShutdownTimeout = "30s"
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
@@ -595,6 +602,17 @@ func (c *Config) normalize() error {
 	}
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
+	}
+	// 优雅关停窗口：空回落 30s（分钟级在途 SSE 远比旧固定 5s 常见）；"0" 合法
+	//（立即退）；负值 fail fast。
+	if c.Server.ShutdownTimeout == "" {
+		c.Server.ShutdownTimeout = "30s"
+	}
+	if c.ShutdownTimeoutDur, err = time.ParseDuration(c.Server.ShutdownTimeout); err != nil {
+		return fmt.Errorf("server.shutdown_timeout: %q %w", c.Server.ShutdownTimeout, err)
+	}
+	if c.ShutdownTimeoutDur < 0 {
+		return fmt.Errorf("server.shutdown_timeout: 负时长 %q 无意义", c.Server.ShutdownTimeout)
 	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)

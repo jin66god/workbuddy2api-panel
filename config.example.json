@@ -5,7 +5,8 @@
   "state_file": "./data/state.json",
   "dns_servers": [],
   "server": {
-    "read_timeout": "300s"
+    "read_timeout": "300s",
+    "shutdown_timeout": "30s"
   },
   "panel": {
     "package_detail_limit": 5

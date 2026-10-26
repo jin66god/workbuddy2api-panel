@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -98,10 +99,26 @@ type Panel struct {
 	taskMu    sync.Mutex
 	taskLocks map[string]*sync.Mutex
 
+	// batchRunning 手动全量运维接口（签到/旅行/活跃/保活/余额）共用的防重入
+	// 闸门：这些动作都是逐号打上游，双击一次 = 两轮全量并发，每号至少翻倍
+	// 上游请求（正是批间节流与风控要避免的形态）。TryLock 语义，见 tryStartBatch。
+	batchRunning atomic.Bool
+
+	// modelsMu/modelsCache* /panel/api/models 的短 TTL 结果缓存：该接口是
+	// 「CN 目录直连 + global 目录」的实时上游聚合，前端刷新按钮与外部脚本
+	// 反复调用会成倍放大上游请求。只缓存零 fetchErr 的完整响应。
+	modelsMu      sync.Mutex
+	modelsCacheAt time.Time
+	modelsCache   []map[string]any
+
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
 }
+
+// modelsCacheTTL 面板模型列表的结果缓存时长（测试可注入短值）。只缓存「零
+// fetchErr」的完整成功响应；部分失败的结果每次照常重探，直到拿到干净目录。
+var modelsCacheTTL = 60 * time.Second
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
 func (p *Panel) tryLockAccount(uid string) bool {
@@ -439,6 +456,14 @@ func (p *Panel) nicknames() map[string]string {
 // 各域独立探测、独立容错：某域无可用账号则整域跳过；两域全空时才报错
 // （有错误明细回 502，一个账号都没有回 503）。
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
+	// refresh=1 绕过缓存强制重探（前端「刷新模型」按钮带该参数）；其余请求
+	// 命中 60s 缓存时直接返回，避免反复点按/脚本轮询把上游目录接口打穿。
+	if r.URL.Query().Get("refresh") != "1" {
+		if cached := p.loadModelsCache(); cached != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": cached, "cached": true})
+			return
+		}
+	}
 	out := make([]map[string]any, 0)
 	var fetchErrs []string
 
@@ -483,7 +508,28 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
+	if len(fetchErrs) == 0 {
+		p.storeModelsCache(out)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+}
+
+// loadModelsCache 返回未过期的成功聚合结果；TTL 过期或从未成功过返回 nil。
+func (p *Panel) loadModelsCache() []map[string]any {
+	p.modelsMu.Lock()
+	defer p.modelsMu.Unlock()
+	if p.modelsCache == nil || time.Since(p.modelsCacheAt) >= modelsCacheTTL {
+		return nil
+	}
+	return p.modelsCache
+}
+
+// storeModelsCache 记录一次零错误聚合（refresh=1 的强制重探同样刷新缓存）。
+func (p *Panel) storeModelsCache(models []map[string]any) {
+	p.modelsMu.Lock()
+	defer p.modelsMu.Unlock()
+	p.modelsCache = models
+	p.modelsCacheAt = time.Now()
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
@@ -739,13 +785,35 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 // 批量任务
 // ---------------------------------------------------------------------------
 
+// tryStartBatch 手动全量运维接口的防重入闸门：五个动作（签到/旅行/活跃/保活/
+// 余额）共用一把——它们都是逐号打上游，双击一次就是两轮全量并发，每号至少
+// 翻倍上游请求，正是批间节流与上游风控要避免的形态。断言调用方在 scheduler
+// 可用性检查之后调用，避免 501 时白占闸门。
+func (p *Panel) tryStartBatch(w http.ResponseWriter, action string) bool {
+	if !p.batchRunning.CompareAndSwap(false, true) {
+		writeErr(w, http.StatusConflict, "已有全量任务在执行中，请等待本轮完成后再触发")
+		log.Printf("panel: %s 重复触发被拒绝（已有全量任务在跑）", action)
+		return false
+	}
+	return true
+}
+
+// finishBatch 归还防重入闸门。
+func (p *Panel) finishBatch() { p.batchRunning.Store(false) }
+
 // checkinAll 手动触发全量签到（异步执行，进度看日志区/账号状态变化）。
 func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunCheckinNow()
+	if !p.tryStartBatch(w, "全量签到") {
+		return
+	}
+	go func() {
+		defer p.finishBatch()
+		p.cfg.Scheduler.RunCheckinNow()
+	}()
 	log.Printf("panel: 手动全量签到已触发（含猫猫旅行）")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -756,7 +824,13 @@ func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunTravelNow()
+	if !p.tryStartBatch(w, "全量旅行巡检") {
+		return
+	}
+	go func() {
+		defer p.finishBatch()
+		p.cfg.Scheduler.RunTravelNow()
+	}()
 	log.Printf("panel: 手动全量旅行巡检已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -767,7 +841,13 @@ func (p *Panel) activityAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunActivityNow()
+	if !p.tryStartBatch(w, "全量活跃上报") {
+		return
+	}
+	go func() {
+		defer p.finishBatch()
+		p.cfg.Scheduler.RunActivityNow()
+	}()
 	log.Printf("panel: 手动全量活跃上报已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -778,7 +858,13 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunKeepaliveNow()
+	if !p.tryStartBatch(w, "全量保活") {
+		return
+	}
+	go func() {
+		defer p.finishBatch()
+		p.cfg.Scheduler.RunKeepaliveNow()
+	}()
 	log.Printf("panel: 手动全量保活已触发")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
@@ -791,6 +877,10 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
+	if !p.tryStartBatch(w, "全量余额刷新") {
+		return
+	}
+	defer p.finishBatch()
 	p.cfg.Scheduler.RunBalanceRefreshNow()
 	p.syncNicknames()
 	log.Printf("panel: 手动全量余额刷新完成")

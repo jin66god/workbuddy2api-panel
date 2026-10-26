@@ -320,7 +320,9 @@ func runPoll(base, origin, realm, site, statePath string, client *http.Client, o
 		if status == 0 || status >= 500 {
 			fatal("token endpoint error: %v", errTok)
 		}
-		fatal("登录未完成（waiting for login）。请确认已在浏览器完成登录再按 y")
+		// 走到这里的是「非信封 4xx」（HTML 错误页等）：state 多半已过期/失效，
+		// 反复「确认浏览器登录 + 按 y」永远不会再成功——正确动作是重跑 login url。
+		fatal("登录状态查询被拒（HTTP %d）：%v\nstate 可能已过期，请重新运行 login url", status, errTok)
 	}
 	var tok struct {
 		AccessToken  string `json:"accessToken"`
@@ -329,7 +331,7 @@ func runPoll(base, origin, realm, site, statePath string, client *http.Client, o
 		Domain       string `json:"domain"`
 	}
 	if err := json.Unmarshal(tokRaw, &tok); err != nil || tok.AccessToken == "" {
-		fatal("登录未完成（waiting for login）。请确认已在浏览器完成登录再按 y")
+		fatal("token 响应异常（缺少 accessToken）：%v\n若浏览器侧已显示登录失败，请重新运行 login url", err)
 	}
 	// login/account 拿 uid/nickname（带 Bearer）
 	var acct struct {
