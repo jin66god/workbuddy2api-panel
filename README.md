@@ -28,9 +28,8 @@
 
 ---
 
-> **本仓库**是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的独立增强分支（前身为该项目的 fork，现已迁至独立仓库），面向**个人自用**的多账号运维。
+> **本仓库**是 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的独立增强分支，面向**个人自用**的多账号运维。
 > 二进制、Docker 镜像与 Release 均以本仓库为准：`ghcr.io/jin66god/workbuddy2api`。
-> 本仓库自 2026-10-23 起为**独立仓库**（前身为 `jin66god/w2api-panel`，已归档），后续版本与 Issue 均在此维护。
 >
 > ⚠️ 仅限管理本人授权的账号，**禁止**批量注册、转售额度、加壳或卡密分发。详见[使用声明](#使用声明必读)。
 
