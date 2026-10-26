@@ -13,9 +13,9 @@ import (
 )
 
 // ClientVersion 官方 CodeBuddy CLI 版本（UA 与授权链接 version 参数同源）。
-// 对齐 2026-10-24 的 @tencent-ai/codebuddy-code@2.174.0。只作用于登录链路；
+// 对齐 2026-10-26 的 @tencent-ai/codebuddy-code@2.176.0。只作用于登录链路；
 // chat 侧 UA 另按账号身份分档（见 upstream/headers.go），两者不同源、不要合并。
-const ClientVersion = "2.174.0"
+const ClientVersion = "2.176.0"
 
 // ClientUA 设备授权链路的 User-Agent（与官方 CLI 同形）。
 const ClientUA = "CLI/" + ClientVersion + " CodeBuddy/" + ClientVersion
