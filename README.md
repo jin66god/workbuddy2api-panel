@@ -361,7 +361,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 
 | 站点 | 上游主机 | 说明 |
 |---|---|---|
-| `cn` 国内版 | `copilot.tencent.com` / `codebuddy.cn` | 默认；签到、成长任务、连登体系均在此站点 |
+| `cn` 国内版 | 对话 `www.workbuddy.cn`；登录 `copilot.tencent.com`（Origin `codebuddy.cn`） | 默认；签到、成长任务、连登体系均在此站点。对话主域取官方桌面端 endpoint，`copilot` 是备选入口，可用 `cn.chat_base` 回退 |
 | `intl` 国际站 | `www.codebuddy.ai` | 官方 CLI 国际站；登录后自动注册地区、激活、领试用额度，不发起 CN 签到 |
 | `workbuddy` 国际旧版 | `www.workbuddy.ai` | 旧桌面端国际版；与 `intl` 同后端但 **token 只在签发域可用** |
 

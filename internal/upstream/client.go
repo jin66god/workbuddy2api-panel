@@ -849,9 +849,16 @@ type CreditObserver func(uid string, credits int64)
 func New() *Client {
 	tr := newTransport()
 	c := &Client{
-		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
-		ChatBaseCN:    "https://copilot.tencent.com",
+		HTTP:     &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		ChatHTTP: &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		// ChatBaseCN 取官方桌面端的 endpoint（product.json）：www.workbuddy.cn。
+		// copilot.tencent.com 是官方 NetworkFailover 里的备选入口，把它当主入口
+		// 是可判别的形态差异；且 copilot 对海外出口 TLS 握手会直接复位。
+		// 实测同账号两条域 /v3/config、billing 汇总、chat 空体返回一致；
+		// /v2/plugin/auth/token/refresh 也已验证 workbuddy.cn 同构（空 refreshToken
+		// 返回同样的 code=10001），故 token 刷新不会因换域失效。
+		// 需要回退时把 cn.chat_base 填 https://copilot.tencent.com 即可。
+		ChatBaseCN:    "https://www.workbuddy.cn",
 		BillingBaseCN: "https://www.codebuddy.cn",
 		WebBaseCN:     "https://www.workbuddy.cn",
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：

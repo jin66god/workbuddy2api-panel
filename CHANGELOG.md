@@ -3,6 +3,18 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.21.1（2026-10-26）
+
+### 变更
+
+- **国内版对话主域切到 `www.workbuddy.cn`**：官方桌面端 `product.json` 的 endpoint 就是它，
+  `copilot.tencent.com` 只是 `NetworkFailover` 里的备选入口，长期拿备选当主入口是可判别的
+  形态差异；且 copilot 对海外出口 TLS 握手会直接复位。两条域实测 `/v3/config`、billing 汇总、
+  对话空体返回一致；token 刷新路径也已验证同构（空 refreshToken 返回同样的 `code=10001`），
+  不会因换域导致刷新失效。需要回退时在 `cn.chat_base` 填 `https://copilot.tencent.com`。
+- **面板添加账号说明补齐域分工**：国内版对话 `www.workbuddy.cn`、登录 Origin `www.codebuddy.cn`、
+  成长任务 `www.workbuddy.cn`，不再只标一个 `codebuddy.cn` 让人以为 `workbuddy.cn` 被去掉。
+
 ## v1.21.0（2026-10-26）
 
 ### 新增
