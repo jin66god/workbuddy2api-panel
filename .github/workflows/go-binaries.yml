@@ -199,8 +199,9 @@ jobs:
             echo "::error::Release 日志缺少「## 更新说明」段落"
             exit 1
           fi
-          # 禁止混入验证/部署/镜像/校验/内部备忘等非更新说明内容
-          if grep -Eq '完整变更|镜像 tag|index digest|校验|升级|部署命令|保留（不出站|勿改' <<< "$BODY"; then
+          # 禁止混入验证/部署/镜像/资产校验/内部备忘等非更新说明内容
+          # 注意不要用裸「校验」：正常修复文案里的「渠道校验」「参数校验」会被误杀。
+          if grep -Eq '完整变更|镜像 tag|index digest|校验和|资产校验|sha256|升级|部署命令|保留（不出站|勿改' <<< "$BODY"; then
             echo "::error::Release 日志只能包含更新说明，检测到额外段落"
             exit 1
           fi
