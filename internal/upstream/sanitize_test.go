@@ -554,3 +554,70 @@ func TestDSHPathSentenceSystemMessageSanitized(t *testing.T) {
 		t.Fatalf("not idempotent: %q", msgs2[0].(map[string]any)["content"])
 	}
 }
+
+// DSH 0.3.x @ 路径说明整段（5 句）：上游按连续原文匹配，单发首句 200、连排 400。
+// 对齐社区实测口径：整段同义改写，语义（相对路径基准/目录斜杠/按文件读）全保留。
+const dshPathsParaNew = "Tokens prefixed with @ are paths the user explicitly referenced. " +
+	"Relative paths resolve from the workspace root; absolute paths identify " +
+	"files or directories on the host. A trailing slash marks a directory: " +
+	"list it when its contents matter. Anything else is a file: use the read " +
+	"tool when its contents are needed, and do not claim to have inspected it " +
+	"before reading. @\"...\" quotes a path containing spaces."
+
+const dshPathsParaOld = "Tokens prefixed with @ are paths the user explicitly referenced. " +
+	"Relative paths resolve from the workspace root; absolute paths point to " +
+	"files or directories on the host. A trailing slash marks a directory, so " +
+	"list it when its contents matter. Anything else is a file: open it with " +
+	"the read tool when its contents are needed, and never claim to have " +
+	"inspected it before reading. The @\"...\" form only quotes a path that " +
+	"contains spaces."
+
+func TestDSHPathsParagraphBothWordings(t *testing.T) {
+	for name, in := range map[string]string{"current": dshPathsParaNew, "older": dshPathsParaOld} {
+		out := sanitizeText(in)
+		if out != sanitizeDSHPathsReplacement {
+			t.Fatalf("%s wording not replaced: %q", name, out)
+		}
+		if hasFingerprint(out) {
+			t.Fatalf("%s: replacement still hits fingerprint", name)
+		}
+	}
+}
+
+func TestDSHPathsParagraphEmbeddedAndIdempotent(t *testing.T) {
+	in := "before\n\n" + dshPathsParaNew + "\n\nafter"
+	want := "before\n\n" + sanitizeDSHPathsReplacement + "\n\nafter"
+	if got := sanitizeText(in); got != want {
+		t.Fatalf("embedded not replaced: %q", got)
+	}
+	once := sanitizeText(dshPathsParaNew)
+	if again := sanitizeText(once); again != once {
+		t.Fatalf("not idempotent: %q", again)
+	}
+}
+
+// 段外的 @ 与「形似但非整段」的文本不得被改写。
+func TestDSHPathsUnrelatedAtTextUntouched(t *testing.T) {
+	for _, text := range []string{
+		"Mail me at someone@example.com and open C:\\cache\\@tmp.",
+		"npm i @deepseek-ai/dsh-llm",
+		"Relative paths resolve from the workspace root, but this sentence is not the @ paragraph.",
+	} {
+		if got := sanitizeText(text); got != text {
+			t.Fatalf("unrelated text altered: %q -> %q", text, got)
+		}
+	}
+}
+
+// 出站报文必须真的带上改写（wire 级，不是只测 helper）。
+func TestDSHPathsWireBody(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"` +
+		strings.ReplaceAll(dshPathsParaNew, `"`, `\"`) + `"},{"role":"user","content":"hi"}]}`)
+	out := string(PrepareBodyOpt(body, true))
+	if !strings.Contains(out, "Paths beginning with @ refer to files") || strings.Contains(out, "Tokens prefixed with @") {
+		t.Fatalf("wire body not sanitized: %s", out)
+	}
+	if raw := string(PrepareBodyOpt(body, false)); !strings.Contains(raw, "Tokens prefixed with @") {
+		t.Fatal("sanitize=false should keep original text")
+	}
+}

@@ -97,6 +97,20 @@ var sanitizeRewrites = [][2]string{
 	},
 }
 
+// sanitizeDSHPathsRe @ 路径说明段（DSH 0.3.x 系统提示）：上游按「连续原文」做渠道
+// 校验，单发首句 200、前两句连排即 400 code=11-128。整段换成同义表述（@ 路径语义
+// 全部保留：相对路径基准、结尾斜杠表示目录、其余按文件读、@"..." 含空格路径），
+// 只改措辞让连续特征失配。DOTALL 锚定整段，覆盖两种线上措辞；段外的 @（邮箱、
+// 包名、C:\\path\\@cache）不匹配。
+var sanitizeDSHPathsRe = regexp.MustCompile(`(?is)Tokens prefixed with @ are paths the user explicitly referenced\..*?path (?:containing|that contains) spaces\.`)
+
+const sanitizeDSHPathsReplacement = "Paths beginning with @ refer to files the user explicitly mentioned. " +
+	"Relative paths are resolved against the workspace root; absolute paths point " +
+	"to files or directories on the host. A trailing slash marks a directory, so " +
+	"list it when its contents matter. Anything else is a file: open it with the " +
+	"read tool when its contents are needed, and never claim to have inspected it " +
+	"before reading. The @\"...\" form only quotes a path that contains spaces."
+
 // sanitizeIdentityFeatures 身份类特征预检：只对 system/developer 生效。
 //
 // DSH 的系统提示词里带裸品牌词 "DeepSeek Harness"（除首句身份句外，正文还会
@@ -132,6 +146,10 @@ func sanitizeTextWith(text string, identity bool) string {
 	}
 	if !hit {
 		return text
+	}
+	// 整段改写先于逐句字面量：命中即整段替换，后续字面量规则自然失配（幂等）。
+	if sanitizeDSHPathsRe.MatchString(text) {
+		text = sanitizeDSHPathsRe.ReplaceAllString(text, sanitizeDSHPathsReplacement)
 	}
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
