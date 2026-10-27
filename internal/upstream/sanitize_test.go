@@ -511,3 +511,46 @@ func TestPrepareBodyDSHBrandSystemOnly(t *testing.T) {
 		t.Errorf("user content should keep the brand word: %s", out)
 	}
 }
+
+// issue #680：DSH 系统提示里两句路径说明连排即触发上游渠道校验（400 code=11-128）。
+// 单句各自 200，改第二句无效，必须拆断第一句（are paths 后插入 that）。
+func TestDSHPathSentenceRewritten(t *testing.T) {
+	const first = "Tokens prefixed with @ are paths the user explicitly referenced."
+	const second = "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	out := sanitizeText(first + "\n" + second)
+	if !strings.Contains(out, "are paths that the user explicitly referenced.") {
+		t.Fatalf("first sentence not rewritten: %q", out)
+	}
+	if !strings.Contains(out, second) {
+		t.Fatalf("second sentence changed: %q", out)
+	}
+	if strings.Contains(out, "are paths the user explicitly referenced") {
+		t.Fatalf("original adjacency kept: %q", out)
+	}
+}
+
+// 第二句单独出现时不得被改写（避免误伤用户文本）。
+func TestDSHPathSentenceSecondOnlyNotTouched(t *testing.T) {
+	const second = "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	if got := sanitizeText(second); got != second {
+		t.Fatalf("second sentence alone changed: %q", got)
+	}
+}
+
+// DSH 走 system prompt：经 sanitizeMessages 也必须命中，且幂等。
+func TestDSHPathSentenceSystemMessageSanitized(t *testing.T) {
+	const in = "Tokens prefixed with @ are paths the user explicitly referenced.\n" +
+		"Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	msgs := []any{map[string]any{"role": "system", "content": in}}
+	if !sanitizeMessages(msgs) {
+		t.Fatal("system message with DSH path sentences not sanitized")
+	}
+	got := msgs[0].(map[string]any)["content"].(string)
+	if strings.Contains(got, "are paths the user explicitly referenced") {
+		t.Fatalf("not rewritten: %q", got)
+	}
+	msgs2 := []any{map[string]any{"role": "system", "content": got}}
+	if sanitizeMessages(msgs2) {
+		t.Fatalf("not idempotent: %q", msgs2[0].(map[string]any)["content"])
+	}
+}

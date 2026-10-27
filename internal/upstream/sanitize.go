@@ -21,6 +21,7 @@ var sanitizeFeatures = []string{
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
+	"Tokens prefixed with @ are paths",                // DSH 路径提示句首（与下句连排触发 11-128）
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -85,6 +86,14 @@ var sanitizeRewrites = [][2]string{
 		// 不改写必然失败。插入连字符保留可读性与指代（零宽空格无效，实测上游会归一化）。
 		"11128",
 		"11-128",
+	},
+	{
+		// DSH 系统提示里 "Tokens prefixed with @ are paths the user explicitly referenced."
+		// 与下一句 "Relative paths resolve from the workspace root; ..." 连排即触发上游
+		// 渠道校验（400 code=11-128，单句各自 200）。只在 are paths 后插入 that，
+		// 拆断连排文本、语义不变；匹配串不带结尾标点，句号/换行形态一并覆盖。
+		"Tokens prefixed with @ are paths the user explicitly referenced",
+		"Tokens prefixed with @ are paths that the user explicitly referenced",
 	},
 }
 
