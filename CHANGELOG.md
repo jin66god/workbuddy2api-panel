@@ -7,20 +7,13 @@
 
 ### 修复
 
-- 补齐 login 侧两处 CN Origin：`internal/panel/login.go` 与 `internal/loginsite`
-  （站点 CN Origin）同步改为 `https://www.workbuddy.cn`；billing/school 的 **API 主机**
-  仍为 codebuddy.cn（那是接口域名，5.9.3 未变）。v1.21.8 只改了 headers.go，登录链路漏改。
-
-## v1.21.8（2026-10-28）
-
-### 修复
-
 - **11-128 补齐第二层抢救「搬家」**：降级期不再直接整体替换成中性提示词（会丢掉客户端人设/项目约定），
   改为先把 system 原文搬进首条 user、原 system 位置放中性提示词——一个字符都不丢；搬不动
   （无 system 文本/多模态 parts/无 user）才退回整体替换。至此形成三层：拆句（结构）→ 搬家（保人格）→ 替换（兜底）。
-- **对齐 WorkBuddy 5.9.3 客户端契约（三个确定值）**：CN 客户端版本 `5.8.3`→`5.9.3`，
-  内置 CLI `2.161.0`→`2.165.0`，CN Origin/Referer `codebuddy.cn`→`workbuddy.cn`
-  （5.9.3 真机 661 条带 Origin 请求零使用 codebuddy.cn，旧值属 CodeBuddy CLI 时代遗留）。
+- **对齐 WorkBuddy 5.9.3 客户端契约**：CN 客户端版本 `5.8.3`→`5.9.3`，内置 CLI `2.161.0`→`2.165.0`；
+  CN Origin/Referer 统一改为 `https://www.workbuddy.cn`，覆盖 `headers.go`、`panel/login.go`、`loginsite`
+  三处。5.9.3 真机 661 条带 Origin 请求零使用 codebuddy.cn（旧值属 CodeBuddy CLI 时代遗留）；
+  billing/school 的 **API 主机**仍为 codebuddy.cn，那是接口域名，5.9.3 未变。
 
 ## v1.21.7（2026-10-28）
 
