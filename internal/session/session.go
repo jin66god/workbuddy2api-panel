@@ -41,6 +41,10 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// AssignableForModel 仅用于**新会话分配**：在 AvailableForModel 口径上再叠加
+	// 快过期硬优先（子集非空时只分配快过期账号）。nil 时回落 AvailableForModel，
+	// 行为与引入前一致。注意不要让已有绑定的校验走这里，否则会频繁迁移会话。
+	AssignableForModel func(model string) []string
 }
 
 // Router 会话粘性路由器。
@@ -189,7 +193,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice(model)
+	uids := r.assignableSlice(model)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -300,6 +304,15 @@ func (r *Router) availableSet(model string) map[string]bool {
 		set[u] = true
 	}
 	return set
+}
+
+// assignableSlice 安全调用 AssignableForModel；未注入时回落 availableSlice。
+// 只在 ResolveForModel 的慢路径（新分配）使用。
+func (r *Router) assignableSlice(model string) []string {
+	if r.cfg.AssignableForModel != nil {
+		return r.cfg.AssignableForModel(model)
+	}
+	return r.availableSlice(model)
 }
 
 // availableSlice 安全调用 AvailableForModel；未注入时回落 Available（nil 视空池）。

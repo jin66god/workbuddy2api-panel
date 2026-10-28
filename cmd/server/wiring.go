@@ -22,3 +22,13 @@ func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 		return p.WeightedAvailableUIDsForModelRealm(bare, realm)
 	}
 }
+
+// realmAwareAssignableForModel 构造**新会话分配**用的 realm 感知闭包：
+// 口径 = healthy + 积分保底 + 在途 + 快过期硬优先（与 pool.pick 一致）。
+// 已有绑定的校验仍走 realmAwareAvailableForModel（不含硬优先），避免会话抖动。
+func realmAwareAssignableForModel(p *pool.Pool) func(model string) []string {
+	return func(model string) []string {
+		realm, bare := server.ResolveModel(model)
+		return p.StickyAssignableForModelRealm(bare, realm)
+	}
+}

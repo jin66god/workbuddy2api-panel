@@ -53,6 +53,9 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 		if !e.healthyForModel(now, model) {
 			continue
 		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue // 积分保底：触底号不进粘性候选（与 pick 口径一致）
+		}
 		if p.inFlightFull(e) {
 			continue
 		}
@@ -96,4 +99,52 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 	}
 	sort.Strings(uids)
 	return uids
+}
+
+// StickyAssignableForModelRealm 供**新会话哈希分配**的候选列表：在 lookup 口径
+// （healthy + 积分保底 + 在途）之上叠加「快过期硬优先」——子集非空时只返回快过期账号，
+// 与 pool.pick 的 prefer_expiring 语义保持一致；子集为空时回落全量。
+//
+// 为什么不直接改 WeightedAvailableUIDsForModelRealm：后者同时用于校验**已有绑定**。
+// 若校验也用硬优先，已绑定、健康、但不在快过期集合的号会被误判不可用 → 会话每轮迁移、
+// 上游账号级前缀缓存每次击穿（3.4 万 token 重算的实案）。
+func (p *Pool) StickyAssignableForModelRealm(model, realm string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	var all, expiring []*entry
+	for _, e := range p.byUID {
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		all = append(all, e)
+		if p.preferExpiring && expiringNow(e, now) {
+			expiring = append(expiring, e)
+		}
+	}
+	use := all
+	if p.preferExpiring && len(expiring) > 0 {
+		use = expiring
+	}
+	sort.Slice(use, func(i, j int) bool { return use[i].a.UID < use[j].a.UID })
+	out := make([]string, 0, len(use))
+	for _, e := range use {
+		slots := 1
+		if p.preferExpiring && expiringNow(e, now) {
+			slots = expiringVirtualSlots
+		}
+		for i := 0; i < slots; i++ {
+			out = append(out, e.a.UID)
+		}
+	}
+	return out
 }

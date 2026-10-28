@@ -84,8 +84,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
-	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
-	// 抽签权重共享同一基准，两个阶段权重可比。
+	// maxCredits 用**快过期裁剪后的候选口径**（prefer_expiring 生效且子集非空时即该子集；
+	// 未开启/子集为空时就是全量 healthy 候选）。截断排序与抽签权重共享同一基准，
+	// 两个阶段权重可比；子集内归一化不改变相对排序，只影响权重绝对刻度。
 	var maxCredits int64
 	for _, e := range cands {
 		if e.credits > maxCredits {
@@ -464,7 +465,8 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 
 // expiringNow 报告账号是否存在当前仍有效的快过期积分批次。
 func expiringNow(e *entry, now time.Time) bool {
-	return e.creditsExpiring > 0 &&
+	return e.credits > 0 &&
+		e.creditsExpiring > 0 &&
 		e.creditsEarliestRemaining > 0 &&
 		!e.creditsEarliestExpiry.IsZero() &&
 		e.creditsEarliestExpiry.After(now)
