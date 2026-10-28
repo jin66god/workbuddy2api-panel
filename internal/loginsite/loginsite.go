@@ -45,7 +45,7 @@ type Site struct {
 var (
 	siteCN = Site{
 		ID: SiteCN, Realm: RealmCN,
-		API: "https://copilot.tencent.com", Origin: "https://www.codebuddy.cn",
+		API: "https://copilot.tencent.com", Origin: "https://www.workbuddy.cn",
 		Platform: "CLI",
 	}
 	siteIntl = Site{

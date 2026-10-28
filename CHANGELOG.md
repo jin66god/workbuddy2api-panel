@@ -3,6 +3,14 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.21.9（2026-10-28）
+
+### 修复
+
+- 补齐 login 侧两处 CN Origin：`internal/panel/login.go` 与 `internal/loginsite`
+  （站点 CN Origin）同步改为 `https://www.workbuddy.cn`；billing/school 的 **API 主机**
+  仍为 codebuddy.cn（那是接口域名，5.9.3 未变）。v1.21.8 只改了 headers.go，登录链路漏改。
+
 ## v1.21.8（2026-10-28）
 
 ### 修复

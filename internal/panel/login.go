@@ -33,7 +33,7 @@ const (
 	// 共用，避免「面板能登、CLI 不能登」的分叉）。chat 侧 UA 另按账号身份分档。
 	clientVersion       = loginsite.ClientVersion
 	clientUA            = loginsite.ClientUA
-	originRefererCN     = "https://www.codebuddy.cn"
+	originRefererCN     = "https://www.workbuddy.cn"
 	originRefererGlobal = loginsite.BaseWorkBuddy
 )
 
