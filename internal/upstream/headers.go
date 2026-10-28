@@ -17,15 +17,15 @@ const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
 	// 白名单头组的 X-IDE-Version）。对齐 CN 官方桌面端 5.8.3（2026-10-20 真机抓包）。
 	// config upstream.client_version 可覆盖（空 = 内置默认，CN/global 共用覆盖值）。
-	defaultClientVersion = "5.8.3"
+	defaultClientVersion = "5.9.3"
 	// defaultGlobalClientVersion 国际版官方客户端版本。两版发版节奏不同（CN 5.8.3 /
 	// global 5.8.4），共用一个值会让国际版号的 UA 对不上当前分发包。
 	defaultGlobalClientVersion = "5.8.4"
 	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.161.0）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.161.0"
+	defaultCliVersion = "2.165.0"
 
-	originRefererCN     = "https://www.codebuddy.cn"
+	originRefererCN     = "https://www.workbuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
 

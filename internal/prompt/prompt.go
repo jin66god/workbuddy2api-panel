@@ -326,3 +326,58 @@ func EnsureSystemFirst(body []byte, fallback string) []byte {
 	}
 	return out
 }
+
+// MoveSystemToUser 把首条 system/developer 的原文搬进首条 user 消息开头，原 system
+// 位置换成中性提示词 —— 只换承载通道，一个字符都不丢（客户端人设/项目约定完整保留）。
+//
+// 11-128 的第二层抢救：拆句（层1）失效、但上游仍按 system 内容判渠道时，搬家能绕开
+// 同时保住人格；整体替换 Degraded（层3）会丢人设，只在搬家不可行时使用。
+// 失败返回 false：无 system 文本、首条非 system/developer、user 是多模态 parts、或没有 user。
+func MoveSystemToUser(body []byte, neutral string) ([]byte, bool) {
+	if len(body) == 0 || neutral == "" {
+		return body, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body, false
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body, false
+	}
+	first, ok := msgs[0].(map[string]any)
+	if !ok {
+		return body, false
+	}
+	switch role, _ := first["role"].(string); role {
+	case "system", "developer":
+	default:
+		return body, false
+	}
+	sysText, ok := first["content"].(string)
+	if !ok || strings.TrimSpace(sysText) == "" {
+		return body, false
+	}
+	for _, m := range msgs[1:] {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := mm["role"].(string); role != "user" {
+			continue
+		}
+		txt, ok := mm["content"].(string)
+		if !ok {
+			return body, false // 多模态 parts：插文本会打乱 part 顺序
+		}
+		mm["content"] = sysText + "\n\n" + txt
+		first["role"] = "system"
+		first["content"] = neutral
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body, false
+		}
+		return out, true
+	}
+	return body, false
+}

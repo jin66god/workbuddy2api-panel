@@ -38,7 +38,7 @@ func TestAPIKeyChatHeadersDoubleAuth(t *testing.T) {
 // （实测不需要，带上反而暴露虚假身份）。
 func TestAPIKeyBillingHeadersNoEnterprise(t *testing.T) {
 	c := &Client{}
-	req, _ := http.NewRequest(http.MethodPost, "https://www.codebuddy.cn/v2/billing/meter/get-enterprise-user-usage", nil)
+	req, _ := http.NewRequest(http.MethodPost, "https://www.workbuddy.cn/v2/billing/meter/get-enterprise-user-usage", nil)
 	c.BillingHeaders(req, &auth.Auth{UID: "u1", AccessToken: "ck_9f3a2b1c.deadbeef"})
 	if got := req.Header.Get("X-Enterprise-Id"); got != "" {
 		t.Errorf("X-Enterprise-Id=%q want empty", got)

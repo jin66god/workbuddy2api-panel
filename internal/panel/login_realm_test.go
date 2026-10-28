@@ -13,9 +13,9 @@ func TestLoginEndpoints(t *testing.T) {
 		wantOrigin string
 	}{
 		{"global", "https://www.workbuddy.ai/v2/plugin/auth/state?platform=CLI", "https://www.workbuddy.ai"},
-		{"cn", "https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI", "https://www.codebuddy.cn"},
-		{"", "https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI", "https://www.codebuddy.cn"},
-		{"weird", "https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI", "https://www.codebuddy.cn"},
+		{"cn", "https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI", "https://www.workbuddy.cn"},
+		{"", "https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI", "https://www.workbuddy.cn"},
+		{"weird", "https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI", "https://www.workbuddy.cn"},
 	}
 	for _, c := range cases {
 		t.Run(c.realm, func(t *testing.T) {

@@ -850,7 +850,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !degradedApplied {
 		body = prompt.Append(body, h.cfg.PromptText)
 	} else if degradedApplied {
-		body = prompt.Rewrite(body, prompt.Degraded)
+		// 11-128 三层抢救的层2：先搬家（system 原文搬进首条 user，人格一字不丢），
+		// 搬不动（无 system 文本/多模态 parts/无 user）才退回层3整体替换 Degraded。
+		if moved, ok := prompt.MoveSystemToUser(body, prompt.Degraded); ok {
+			body = moved
+		} else {
+			body = prompt.Rewrite(body, prompt.Degraded)
+		}
 	}
 	// 渠道校验兜底：上游要求 messages[0] 必须是 system（首条 user 直接 400
 	// 11-128「first message is not system prompt」，首条 developer 报
