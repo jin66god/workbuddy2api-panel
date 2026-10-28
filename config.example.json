@@ -1,5 +1,5 @@
 {
-  "listen": ":7863",
+  "listen": "127.0.0.1:7863",
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
@@ -26,17 +26,31 @@
     "soft_rate_max": "2h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "growth_hours": [1],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "growth_hours": [
+      1
+    ],
     "account_spread_minutes": 0,
     "account_spread_min_gap_seconds": 0,
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
     "keepalive_refresh_window": "168h",
-    "blackcat_hours": [23],
-    "balance_refresh_jitter_permill": 150,
-    "task_sweep_jitter_permill": 150,
+    "blackcat_hours": [
+      23
+    ],
+    "balance_refresh_jitter_permill": 0,
+    "task_sweep_jitter_permill": 0,
     "night_account_cap": 0,
     "checkin_enabled": true,
     "growth_enabled": true,
@@ -46,10 +60,7 @@
     "blackcat_enabled": true,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5,
-    "include_disabled_in_tasks": false,
-    "balance_refresh_jitter_permill": 0,
-    "task_sweep_jitter_permill": 0,
-    "night_account_cap": 0
+    "include_disabled_in_tasks": false
   },
   "global": {
     "enabled": true,
@@ -116,5 +127,9 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "watchdog": {
+    "enabled": false,
+    "interval_seconds": 3600
   }
 }

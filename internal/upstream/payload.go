@@ -7,6 +7,7 @@ package upstream
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"strings"
 )
 
@@ -481,16 +482,17 @@ func normalizeToolPatterns(obj map[string]any) {
 		}
 		// OpenAI 形态 tools[].function.parameters；裸 tools[].parameters 兼容。
 		if fn, ok := tool["function"].(map[string]any); ok {
-			unescapePatternLiteralEscapes(fn["parameters"])
+			normalizeSchemaTree(fn["parameters"])
 		}
-		unescapePatternLiteralEscapes(tool["parameters"])
+		normalizeSchemaTree(tool["parameters"])
 	}
 }
 
-// unescapePatternLiteralEscapes 递归改写 schema 树里 pattern 值与 patternProperties
-// 键中的 `\_` → `_`（patternProperties 的键也是正则；map 键不可原地改，命中时重建
-// 该层）。
-func unescapePatternLiteralEscapes(node any) {
+// normalizeSchemaTree 递归归一化工具参数 schema 树：
+//   - pattern 值与 patternProperties 键里的 `\_` → `_`（patternProperties 的键也是正则；
+//     map 键不可原地改，命中时重建该层）；
+//   - 只有 enum、没有 type 的属性补上可无损推断的类型（见 inferEnumType）。
+func normalizeSchemaTree(node any) {
 	switch n := node.(type) {
 	case map[string]any:
 		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
@@ -510,12 +512,55 @@ func unescapePatternLiteralEscapes(node any) {
 				n["patternProperties"] = fixed
 			}
 		}
+		// enum 缺 type：Kimi 系对参数 schema 严格校验，直接 400 11133「Invalid request
+		// parameters」——同一个模型对带这类 schema 的客户端等于全废。类型能无损推断就补上，
+		// 推断不出来（混合标量/含 null）保持原样，让上游按原语义报错，不猜。
+		if _, hasType := n["type"]; !hasType {
+			if e, ok := n["enum"].([]any); ok && len(e) > 0 {
+				if t := inferEnumType(e); t != "" {
+					n["type"] = t
+				}
+			}
+		}
 		for _, v := range n {
-			unescapePatternLiteralEscapes(v)
+			normalizeSchemaTree(v)
 		}
 	case []any:
 		for _, v := range n {
-			unescapePatternLiteralEscapes(v)
+			normalizeSchemaTree(v)
 		}
 	}
+}
+
+// inferEnumType 从 enum 取值推断 JSON Schema 类型；推不出唯一类型时返回空（不改写）。
+// 数字经 encoding/json 解出来一律是 float64，故按「全为整数值」区分 integer / number。
+func inferEnumType(values []any) string {
+	var strs, nums, ints, bools int
+	for _, v := range values {
+		switch x := v.(type) {
+		case string:
+			strs++
+		case bool:
+			bools++
+		case float64:
+			nums++
+			if x == math.Trunc(x) {
+				ints++
+			}
+		default:
+			return "" // null / 对象 / 数组：类型不唯一，不猜
+		}
+	}
+	n := len(values)
+	switch {
+	case strs == n:
+		return "string"
+	case bools == n:
+		return "boolean"
+	case nums == n && ints == n:
+		return "integer"
+	case nums == n:
+		return "number"
+	}
+	return ""
 }

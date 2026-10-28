@@ -34,7 +34,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.21.6-panel"
+const appVersion = "1.21.7-panel"
 
 // insecureKeyWarning 空 api_key = 完全不鉴权（httpauth.VerifyBearer 对空 key 恒放
 // 行），样例占位符 test_key = 人尽皆知的弱密钥；叠加非回环监听（缺省 ":7863" 绑
@@ -414,6 +414,10 @@ func main() {
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
 
+	if cfg.Watchdog.Enabled {
+		go h.WatchCatalog(context.Background(), time.Duration(cfg.Watchdog.IntervalSeconds)*time.Second, nil)
+		log.Printf("watchdog: 上游模型目录监控已开启，每 %ds", cfg.Watchdog.IntervalSeconds)
+	}
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           h,

@@ -18,10 +18,12 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir   string `json:"auth_dir"`   // ./auths
-	StateFile string `json:"state_file"` // ./data/state.json
+	Listen string `json:"listen"` // "127.0.0.1:7863"（缺省只绑回环，对外请走反代）
+	// Watchdog 上游目录改版监控（默认关）：定期对 /v1/models 指纹比对，变化写日志。
+	Watchdog  WatchdogConfig `json:"watchdog"`
+	APIKey    string         `json:"api_key"`    // 空 = 不鉴权
+	AuthDir   string         `json:"auth_dir"`   // ./auths
+	StateFile string         `json:"state_file"` // ./data/state.json
 	// DNSServers 出站解析用的 DNS 服务器（空 = 系统解析器）；也可用 WB2A_DNS 覆盖。
 	// Android/magisk 模块里没有 /etc/resolv.conf，必须显式指定，否则解析全落本机 :53。
 	DNSServers []string `json:"dns_servers,omitempty"`
@@ -312,9 +314,16 @@ type Config struct {
 }
 
 // Default 默认配置。
+// WatchdogConfig 上游目录改版监控配置（默认关；变化仅写日志，可扩展告警）。
+type WatchdogConfig struct {
+	Enabled         bool `json:"enabled"`
+	IntervalSeconds int  `json:"interval_seconds"`
+}
+
 func Default() *Config {
 	c := &Config{
-		Listen:    ":7863",
+		Listen:    "127.0.0.1:7863",
+		Watchdog:  WatchdogConfig{IntervalSeconds: 3600},
 		APIKey:    "",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",

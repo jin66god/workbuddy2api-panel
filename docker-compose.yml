@@ -20,6 +20,8 @@ services:
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
+      # 容器内必须绑 0.0.0.0，否则宿主机端口映射进来的连接会被拒；对外仍由 ports/反代控制
+      - WB2A_LISTEN=0.0.0.0:7863
     ports:
       - "7863:7863"
     volumes:

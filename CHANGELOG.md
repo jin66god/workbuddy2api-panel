@@ -3,6 +3,26 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.21.7（2026-10-28）
+
+### 修复
+
+- **快过期积分优先在会话粘性路径失效**：新会话哈希分配的候选只做 healthy/inFlight
+  过滤，既没有「快过期硬优先」，也漏掉积分保底，导致加权随机 + 粘性下可能把收费模型
+  分给触底号、快过期号只拿到 3 槽概率。现拆分两条口径：`StickyAssignableForModelRealm`
+  （healthy + 保底 + 在途 + 快过期硬优先）只用于新会话分配；`WeightedAvailableUIDsForModelRealm`
+  （加保底、不含硬优先）用于已有绑定校验，避免健康绑定号被硬优先踢掉导致会话抖动与前缀缓存击穿。
+- **`expiringNow` 增加 `credits > 0` 校验**：0 余额号不再被判为「快过期」而优先选中，避免无谓的上游 402 与硬冷却。
+- **工具 schema 的 enum 缺 `type` 时补推断类型**：Kimi 系对参数 schema 严格校验，只写 enum
+  不写 type 会直接 400 `11133`；能无损推断才补（全串/全整数/含小数/全布尔），混合标量或含 null 保持原样。
+
+### 新增
+
+- **上游模型目录改版监控（watchdog，默认关）**：定期对网关 `modelList()` 取排序后 sha256 指纹，
+  变化写日志；首轮只建基线，零新增上游调用。配置 `watchdog.enabled` / `watchdog.interval_seconds`（默认 3600）。
+- **默认监听改为回环**：`Default()` 的 listen 从 `:7863` 改为 `127.0.0.1:7863`，避免空/弱 `api_key`
+  与面板直接暴露公网；`docker-compose.yml` 显式 `WB2A_LISTEN=0.0.0.0:7863` 保证容器端口映射可用。
+
 ## v1.21.6（2026-10-28）
 
 ### 修复

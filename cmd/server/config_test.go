@@ -11,7 +11,7 @@ import (
 
 func TestDefault(t *testing.T) {
 	c := Default()
-	if c.Listen != ":7863" {
+	if c.Listen != "127.0.0.1:7863" {
 		t.Errorf("listen=%s", c.Listen)
 	}
 	if err := c.normalize(); err != nil {
@@ -611,7 +611,7 @@ func TestWriteDefault(t *testing.T) {
 	if c.APIKey != key {
 		t.Errorf("api_key=%q want %q", c.APIKey, key)
 	}
-	if c.Listen != ":7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
+	if c.Listen != "127.0.0.1:7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
 		t.Errorf("generated defaults off: %+v", c)
 	}
 	if len(c.Schedule.CheckinHours) == 0 || !c.Schedule.CheckinEnabled {
