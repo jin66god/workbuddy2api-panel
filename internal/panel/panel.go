@@ -695,6 +695,13 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系（请用「额度」刷新企业口径额度）")
 		return
 	}
+	// 国际版签到活动当前未配置（checkin-activity-status active=false，daily-checkin
+	// 回 400 code=10001）：面板单号入口此前漏了 IsGlobal 门控，点一次就多撞一次上游。
+	// 与自动排程同口径：不盲发写请求，直接给出可读原因。
+	if a.IsGlobal() {
+		writeErr(w, http.StatusUnprocessableEntity, "国际版签到活动未开启（上游当前无该活动，已跳过；活动开放后自动排程会先查状态再签到）")
+		return
+	}
 	checkinMsg := ""
 	checkinDone := false
 	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，

@@ -579,15 +579,24 @@ func TestRunActivityNowGlobalErrorDoesNotSkipCN(t *testing.T) {
 	}
 }
 
-// TestCheckinStillSkipsGlobal 回归护栏：本次只放开活跃上报，签到仍跳过 global
-// （上游 a190252 明确「checkin/travel 门控不动」）。误删该 gate 会让国际版去打
-// CN 专属签到端点。
-func TestCheckinStillSkipsGlobal(t *testing.T) {
+// TestCheckinGlobalQueriesStatusAndSkipsWhenInactive 国际版签到不再盲发写请求：
+// 先查 checkin-activity-status，活动未开启（active=false）时零写请求。
+// 旧护栏是「完全不碰国际域」，但实测两个端点都存在、只是活动未配置，
+// 盲签只会每天撞一次 400 code=10001（多一个风控面）。
+func TestCheckinGlobalQueriesStatusAndSkipsWhenInactive(t *testing.T) {
 	withGlobalSwitch(t)
-	var hits atomic.Int32
+	var statusHits, checkinHits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.Write([]byte(`{"code":0,"data":{}}`))
+		switch r.URL.Path {
+		case "/billing/meter/checkin-activity-status", "/v2/billing/meter/checkin-activity-status":
+			statusHits.Add(1)
+			w.Write([]byte(`{"code":0,"data":{"active":false,"daily_credit":100}}`))
+		case "/billing/meter/daily-checkin", "/v2/billing/meter/daily-checkin":
+			checkinHits.Add(1)
+			w.Write([]byte(`{"code":10001,"msg":"签到活动未开启或已过期"}`))
+		default:
+			w.Write([]byte(`{"code":0,"data":{}}`))
+		}
 	}))
 	defer srv.Close()
 
@@ -605,7 +614,44 @@ func TestCheckinStillSkipsGlobal(t *testing.T) {
 
 	s.RunCheckinNow()
 
-	if n := hits.Load(); n != 0 {
-		t.Errorf("checkin global 上游调用=%d want 0（签到仍应跳过 global）", n)
+	if got := statusHits.Load(); got != 1 {
+		t.Errorf("活动状态查询=%d want 1（先查状态）", got)
+	}
+	if got := checkinHits.Load(); got != 0 {
+		t.Errorf("daily-checkin=%d want 0（active=false 不得盲签）", got)
+	}
+}
+
+// TestCheckinGlobalClaimsWhenActive 活动开放且今日未签时才发一次 claim。
+func TestCheckinGlobalClaimsWhenActive(t *testing.T) {
+	withGlobalSwitch(t)
+	var checkinHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/billing/meter/checkin-activity-status", "/v2/billing/meter/checkin-activity-status":
+			w.Write([]byte(`{"code":0,"data":{"active":true,"today_checked_in":false,"daily_credit":100,"streak_days":3}}`))
+		case "/billing/meter/daily-checkin", "/v2/billing/meter/daily-checkin":
+			checkinHits.Add(1)
+			w.Write([]byte(`{"code":0,"msg":"OK","data":{}}`))
+		default:
+			w.Write([]byte(`{"code":0,"data":{}}`))
+		}
+	}))
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(globalAccount(t, "g1"))
+	up := &upstream.Client{
+		HTTP:              srv.Client(),
+		GlobalEnabled:     true,
+		ChatBaseCN:        srv.URL,
+		BillingBaseCN:     srv.URL,
+		ChatBaseGlobal:    srv.URL,
+		BillingBaseGlobal: srv.URL,
+	}
+	s := New(Config{Pool: p, Upstream: up})
+	s.RunCheckinNow()
+	if got := checkinHits.Load(); got != 1 {
+		t.Errorf("daily-checkin=%d want 1（active 且未签）", got)
 	}
 }

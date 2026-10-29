@@ -585,6 +585,9 @@ func (s *Scheduler) runCheckin(spread bool) {
 		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
 		// 按 CN 处理——这是逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
 		if a.IsGlobal() {
+			// 国际版签到：不是「无签到体系」——端点与客户端都在，只是活动常年未配置。
+			// 走「先查状态、仅 active 且当日未签才 claim」，活动未开启时零写请求。
+			s.checkinGlobal(a)
 			continue
 		}
 		// 企业版与静态 API Key 账号均无签到体系（企业版上游 400 code 10001「企业账号
