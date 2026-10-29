@@ -1389,7 +1389,7 @@ func TestPanelRemarkAndFoldWiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`id="btnRemarks"`, `id="remarkVeil"`, `id="remarkBody"`, `id="btnRemarkSave"`, `id="btnRemarkClear"`, `id="expPad"`, `id="btnExpFold"`} {
+	for _, want := range []string{`id="btnRemarks"`, `id="accRealmFilter"`, `id="remarkVeil"`, `id="remarkBody"`, `id="btnRemarkSave"`, `id="btnRemarkClear"`, `id="expPad"`, `id="btnExpFold"`} {
 		if !bytes.Contains(html, []byte(want)) {
 			t.Fatalf("index.html 缺少 %s", want)
 		}
@@ -1406,6 +1406,9 @@ func TestPanelRemarkAndFoldWiring(t *testing.T) {
 		`function renderRemarkBody(onlyUID)`,
 		`const map = Object.assign({}, remarksAll());`,
 		`onclick = () => openRemarks('')`,
+		`let accRealmFilter = 'all';`,
+		`const showCn = accRealmFilter === 'global' ? [] : cnList;`,
+		`$('accRealmFilter').onchange`,
 	} {
 		if !bytes.Contains(remarkJS, []byte(want)) {
 			t.Fatalf("app.js 缺少 %s", want)

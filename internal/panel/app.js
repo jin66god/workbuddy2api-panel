@@ -384,6 +384,10 @@ setTimeout(() => {
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+/* 账号池域筛选：本库早已按域分组显示，这里只补「只看某一域」的切换——账号多时
+   不用在 cn/global 两段之间滚动。纯展示状态，不改调度与计费。 */
+let accRealmFilter = 'all';
+
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
@@ -479,11 +483,17 @@ function renderAccounts(list) {
   // 按地区分组（国内版 / 国际版）：多账号时先看域再看账号，避免 cn/global 混排。
   const cnList = list.filter(s => s.realm !== 'global');
   const glList = list.filter(s => s.realm === 'global');
+  const showCn = accRealmFilter === 'global' ? [] : cnList;
+  const showGl = accRealmFilter === 'cn' ? [] : glList;
+  if (!showCn.length && !showGl.length) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">当前筛选下没有账号</div>切回「全部域」可看到其它域的账号</div></td></tr>';
+    return;
+  }
   const groupRow = (label, n) => '<tr class="group-row"><td colspan="9">' + label +
     ' · ' + n + ' 个账号</td></tr>';
   tb.innerHTML =
-    (cnList.length ? groupRow('国内版', cnList.length) + cnList.map(rowHTML).join('') : '') +
-    (glList.length ? groupRow('国际版', glList.length) + glList.map(rowHTML).join('') : '');
+    (showCn.length ? groupRow('国内版', showCn.length) + showCn.map(rowHTML).join('') : '') +
+    (showGl.length ? groupRow('国际版', showGl.length) + showGl.map(rowHTML).join('') : '');
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
@@ -3574,6 +3584,10 @@ function saveRemarkForm() {
   else if (view === 'usage' && usageData) renderUsage(usageData);
   toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
 }
+if ($('accRealmFilter')) $('accRealmFilter').onchange = ev => {
+  accRealmFilter = ev.target.value;
+  if (overviewData && overviewData.accounts) renderAccounts(overviewData.accounts);
+};
 if ($('btnRemarks')) $('btnRemarks').onclick = () => openRemarks('');
 if ($('btnRemarkClose')) $('btnRemarkClose').onclick = closeRemarks;
 if ($('btnRemarkClear')) $('btnRemarkClear').onclick = () => {
