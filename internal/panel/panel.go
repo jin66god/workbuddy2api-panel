@@ -111,6 +111,13 @@ type Panel struct {
 	modelsCacheAt time.Time
 	modelsCache   []map[string]any
 
+	// softRateMu/softRateUntil 自动任务的账号级 429 窗口：一轮全量任务要连打
+	// 几十次 ListTasks/accept/claim，撞一次 429 若逐动作各自睡满等待，会把后台
+	// 作业卡几十分钟并长期占着 taskLocks（手动触发也一起堵死）。窗口内后续动作
+	// 快速失败并带剩余时间，窗口外再正常尝试。
+	softRateMu    sync.Mutex
+	softRateUntil map[string]time.Time
+
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
