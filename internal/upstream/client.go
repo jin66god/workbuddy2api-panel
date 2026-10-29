@@ -966,6 +966,9 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+	// CN Kimi 不接受 parameters 里的本地 $ref/$defs：先把引用内联，再走其余改写。
+	// 只对 cn + kimi* 生效，其它模型/域原字节返回（见 kimi_tools.go）。
+	body = prepareKimiTools(body, realm)
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
