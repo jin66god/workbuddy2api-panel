@@ -216,6 +216,12 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 // 与旧实现的差异：有上游重置时间时绝对不做指数堆加；无重置时间时，「冷却中兜底
 // 探测再 429」不再 softStreak++ 翻倍——这正是用户「全池被推到 2h 封顶」的元凶。
 func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
+	if model == "" {
+		// 没有模型上下文（搜索端点、后台任务）：退回账号级软冷却，不能写
+		// modelCooldowns[""]——空键永远匹配不上请求模型，等于完全没冷却。
+		p.CooldownSoftRate(uid, base, resetAt, reason)
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
@@ -238,16 +244,24 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				Reason:  reason,
 			}
 		} else {
-			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
-			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
-			if e.coolKind != CoolSoft || !now.Before(e.until) {
-				d := p.softDurationLocked(base, e.softStreak+1)
-				e.softStreak++
-				e.until = now.Add(d)
+			// 无解析时间（普通 429）：把 **(号, 模型)** 停车，而不是整号冷却。
+			//
+			// 为什么必须模型级：普通 429 与 6004/14003 一样是「这个模型被限流」，
+			// 同号换模型实测立刻可用；按账号冷却会把一次模型抖动放大成整号停摆
+			// （默认 600s、指数封顶 2h），其它模型全被无辜连坐。
+			//
+			// 已生效的模型冷却不延长：并发请求同时撞 429 时，每个失败都续时会让
+			// 一条 1 分钟窗口被拖成 N 分钟——冷却只对齐「首次失败 + base」。
+			if e.modelCooldowns == nil {
+				e.modelCooldowns = map[string]modelCooldown{}
 			}
-			e.coolKind = CoolSoft
-			e.reason = reason
-			clearRoutingModelCooldownsLocked(e)
+			if old, ok := e.modelCooldowns[model]; ok && !old.AuditOnly && old.Until.After(now) {
+				return
+			}
+			e.modelCooldowns[model] = modelCooldown{
+				Until:  now.Add(base),
+				Reason: reason,
+			}
 		}
 		p.dirty.Store(true)
 	}

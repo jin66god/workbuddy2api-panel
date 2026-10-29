@@ -416,13 +416,11 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
 		t.Errorf("calls=%v want bad/good 各 1 次", calls)
 	}
-	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad 应进入 soft_rate 冷却: %+v", st)
-	}
-	// 冷却时长取自注入的 SoftCooldown，不依赖真实等待。
-	if max := int64(soft / time.Second); st.CoolRemaining <= 0 || st.CoolRemaining > max {
-		t.Errorf("cool_remaining_sec=%d want in (0,%d]", st.CoolRemaining, max)
+	// 普通 429 按「账号 × 模型」隔离：账号本身不进账号级冷却，只有 glm-5.2 停；
+	// 同号的其它模型仍可选（否则一次模型抖动会把整号连坐 600s）。
+	assertModelRateCooling(t, p, "bad", "glm-5.2", soft)
+	if p.PickExcludingForModel(nil, "deepseek-v4.1-flash") == nil {
+		t.Fatal("同号其它模型应照常可选")
 	}
 
 	// 冷却生效：同一账号在冷却期内不得再被选中。
@@ -508,13 +506,7 @@ func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad 应进入 soft_rate 冷却: %+v", st)
-	}
-	if st.CoolRemaining <= 599 || st.CoolRemaining > 600 {
-		t.Errorf("default soft cooldown cool_remaining_sec=%d want 600", st.CoolRemaining)
-	}
+	assertModelRateCooling(t, p, "bad", "glm-5.2", 600*time.Second)
 }
 
 // TestChatStickyFollowsFinalSuccess 端到端验证 D4：粘性号失败换号成功后，会话绑定收敛到成功号。
@@ -751,7 +743,9 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 
 // TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
 // （现状不变）。
-func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
+// TestChat6004WithoutResetStillModelScoped 6004 没有重置时刻时同样只停该模型：
+// 不再退回账号级有界退避（那是「一个模型抖动把整号连坐」的放大路径）。
+func TestChat6004WithoutResetStillModelScoped(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
@@ -773,17 +767,7 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
-	}
-	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
-	}
-	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
-		t.Fatalf("rate-limited models=%+v, want audit row for glm-5.3", st.RateLimitedModels)
-	}
+	assertModelRateCooling(t, p, "bad", "glm-5.3", time.Minute)
 }
 
 func TestChatAllUnavailableReturns503(t *testing.T) {
