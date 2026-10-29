@@ -916,7 +916,7 @@ async function loadLogs() {
     box.innerHTML = entries.length
       ? entries.map(e => {
         const lvl = /error|失败|错误/.test(e.text) ? ' e' : /warn|冷却|熔断/.test(e.text) ? ' w' : '';
-        const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+        const t = fmtLogTime(e.ts);
         const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
         return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
       }).join('')
@@ -961,13 +961,21 @@ function creditDeltaText(delta) {
   if (d < 0) return '−' + creditNum(-d);
   return '0';
 }
+/* fmtLogTime 日志 / 历史时间的统一格式：YYYY-MM-DD HH:MM:SS（本地时区）。
+   只显示 时:分:秒 时跨天的记录分不清是哪一天（issue #7）；请求记录、运行日志、
+   积分历史三处共用本函数，避免各自 toLocaleTimeString 漂移。
+   空值返回空串（调用方按需回落 '—'），非法日期返回 '—'（手工改文件的脏数据）。 */
+function fmtLogTime(v) {
+  if (!v) return '';
+  const d = v instanceof Date ? v : new Date(v);
+  if (isNaN(d.getTime())) return '—';
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
 function creditTimeText(e) {
   if (!e || !e.time) return '—';
-  const d = new Date(e.time);
-  // 正常链路 time 由 Go 的 time.Time 序列化，恒为 RFC3339；这里挡的是手工改文件/
-  // 将来换格式等脏数据——toLocaleTimeString 遇到非法日期不抛异常，只会渲染出
-  // "Invalid Date" 这种没意义的字样。
-  return isNaN(d.getTime()) ? '—' : d.toLocaleTimeString('zh-CN', { hour12: false });
+  return fmtLogTime(e.time);
 }
 function creditAccountText(e) {
   e = e || {};
@@ -1064,7 +1072,7 @@ function renderRequestTable() {
   const tb = $('reqBody');
   if (!tb) return;
   tb.innerHTML = list.map(e => {
-    const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+    const when = fmtLogTime(e && e.time) || '—';
     const ip = e && e.client_ip ? e.client_ip : '';
     const ua = e && e.user_agent ? e.user_agent : '';
     const rid = e && e.request_id ? e.request_id : '';
@@ -1114,7 +1122,7 @@ if ($('creditLimit')) $('creditLimit').onchange = loadCreditHistory;
 if ($('btnCreditReload')) $('btnCreditReload').onclick = loadCreditHistory;
 
 function requestLogText(e) {
-  const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+  const when = fmtLogTime(e && e.time) || '—';
   const outcomeLabel = { success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断' };
   const token = Number(e && e.total_tokens || 0) ||
     (Number(e && e.prompt_tokens || 0) + Number(e && e.completion_tokens || 0));
@@ -2642,7 +2650,7 @@ function renderUsageChart(series) {
     return;
   }
 
-  const W = 1200, H = 200, PL = 58, PR = 14, PT = 18, PB = 30;
+  const W = 1200, H = 210, PL = 58, PR = 14, PT = 18, PB = 40;
   const iw = W - PL - PR, ih = H - PT - PB;
 
   const t0 = pts[0].t;
@@ -2749,6 +2757,10 @@ function renderUsageChart(series) {
   // 所以标签永远落在有数据的点上，不会指到空档里。
   const TICKS = Math.min(6, pts.length);
   const usedLabel = new Set();
+  // 先收集候选，再按估算宽度做最小间距过滤（issue #8）：等距采样在数据点聚簇时
+  // 会落到视觉上相邻的两个点上，而首尾标签是 start/end 对齐、天然向内延伸，
+  // 于是「start 与第一个 middle」会叠在一起。
+  const cand = [];
   for (let k = 0; k < TICKS; k++) {
     const target = t0 + span * (TICKS === 1 ? 0.5 : k / (TICKS - 1));
     let bi = 0, best = Infinity;
@@ -2760,10 +2772,31 @@ function renderUsageChart(series) {
     usedLabel.add(bi);
     const p = pts[bi];
     // 首尾标签靠边对齐，避免被裁掉
-    const cx = xOf(p.t);
+    const cx = Math.max(PL, Math.min(W - PR, xOf(p.t)));
     const anchor = cx < PL + 14 ? 'start' : (cx > W - PR - 14 ? 'end' : 'middle');
-    out += '<text class="tk" x="' + Math.max(PL, Math.min(W - PR, cx)).toFixed(1) +
-           '" y="' + (PT + ih + 15) + '" text-anchor="' + anchor + '">' + esc(fmtTokTimeLabel(p)) + '</text>';
+    const label = fmtTokTimeLabel(p);
+    // 11px 字号下数字/冒号约 6.6px 宽；取与 CJK 混排都能覆盖的保守值。
+    const w = Math.max(18, label.length * 6.6);
+    const left = anchor === 'start' ? cx : anchor === 'end' ? cx - w : cx - w / 2;
+    cand.push({ cx, anchor, label, left, right: left + w });
+  }
+  // 首尾必留；中间与已保留标签间距不足 10px 就跳过。尾标签冲突时挤掉中间那个
+  //（「最早 / 最晚」两个锚点比中间某格更重要）。
+  const keep = [];
+  for (let i = 0; i < cand.length; i++) {
+    const c = cand[i], isLast = i === cand.length - 1;
+    if (!keep.length) { keep.push(c); continue; }
+    if (c.left >= keep[keep.length - 1].right + 10) { keep.push(c); continue; }
+    if (isLast) {
+      // 只有首标签可挤时无法再删（首尾都要保留）→ 尾标签下移一行（错行不叠字）。
+      if (keep.length === 1 && c.left < keep[0].right + 10) { c.row = 1; keep.push(c); continue; }
+      while (keep.length >= 2 && c.left < keep[keep.length - 1].right + 10) keep.pop();
+      keep.push(c);
+    }
+  }
+  for (const c of keep) {
+    out += '<text class="tk" x="' + c.cx.toFixed(1) + '" y="' + (PT + ih + 15 + (c.row ? 12 : 0)) +
+           '" text-anchor="' + c.anchor + '">' + esc(c.label) + '</text>';
   }
 
   // 跨天时补一条日期分隔线，让「日界」在长窗口里可见

@@ -148,7 +148,7 @@ function drawMobileUsageChart(series) {
     $('usChartNote').textContent = '—';
     return;
   }
-  const W = 440, H = 230, PL = 56, PR = 12, PT = 18, PB = 30;
+  const W = 440, H = 242, PL = 56, PR = 12, PT = 18, PB = 42;
   const iw = W - PL - PR, ih = H - PT - PB, yBase = PT + ih;
   const t0 = pts[0].t, span = Math.max(1, pts[pts.length - 1].t - t0);
   const max = Math.max(1, ...pts.map(p => p.tt));
@@ -198,8 +198,11 @@ function drawMobileUsageChart(series) {
   }
   out += '<line class="ax" x1="' + PL + '" y1="' + yBase + '" x2="' + (W - PR) + '" y2="' + yBase + '"/>';
   // x 刻度抽到 4 个（上游 6 个），且取"离目标最近的真实柱子"，标签永远落在有数据的点上
+  // 刻度先收集再按估算宽度过滤（issue #8）：窄屏只有 440 宽，等距采样落到相邻
+  // 两个数据点时「start 与第一个 middle」必然叠字。首尾必留，中间重叠就跳过。
   const TICKS = Math.min(4, pts.length);
   const used = new Set();
+  const cand = [];
   for (let k = 0; k < TICKS; k++) {
     const target = t0 + span * (TICKS === 1 ? 0.5 : k / (TICKS - 1));
     let bi = 0, best = Infinity;
@@ -209,10 +212,29 @@ function drawMobileUsageChart(series) {
     }
     if (used.has(bi)) continue;
     used.add(bi);
-    const p = pts[bi], cx = xOf(p.t);
+    const p = pts[bi];
+    const cx = Math.max(PL, Math.min(W - PR, xOf(p.t)));
     const anchor = cx < PL + 16 ? 'start' : (cx > W - PR - 16 ? 'end' : 'middle');
-    out += '<text class="tk" x="' + Math.max(PL, Math.min(W - PR, cx)).toFixed(1) + '" y="' + (yBase + 15).toFixed(1) +
-      '" text-anchor="' + anchor + '">' + esc(fmtTokTimeLabel(p)) + '</text>';
+    const label = fmtTokTimeLabel(p);
+    const w = Math.max(18, label.length * 6.6);
+    const left = anchor === 'start' ? cx : anchor === 'end' ? cx - w : cx - w / 2;
+    cand.push({ cx, anchor, label, left, right: left + w });
+  }
+  const keep = [];
+  for (let i = 0; i < cand.length; i++) {
+    const c = cand[i], isLast = i === cand.length - 1;
+    if (!keep.length) { keep.push(c); continue; }
+    if (c.left >= keep[keep.length - 1].right + 8) { keep.push(c); continue; }
+    if (isLast) {
+      // 首尾都要保留时只能错行，不能互相覆盖（窄屏两点相距十几像素很常见）。
+      if (keep.length === 1 && c.left < keep[0].right + 8) { c.row = 1; keep.push(c); continue; }
+      while (keep.length >= 2 && c.left < keep[keep.length - 1].right + 8) keep.pop();
+      keep.push(c);
+    }
+  }
+  for (const c of keep) {
+    out += '<text class="tk" x="' + c.cx.toFixed(1) + '" y="' + (yBase + 15 + (c.row ? 12 : 0)).toFixed(1) +
+      '" text-anchor="' + c.anchor + '">' + esc(c.label) + '</text>';
   }
   let prevDay = null; // 跨天分隔线：长窗口里能看出日界
   for (const p of pts) {

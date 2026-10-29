@@ -241,11 +241,13 @@ const fmtStart = src.indexOf('function fmtTok(');
 const fmtEnd = src.indexOf('function usStat(');
 const reqStart = src.indexOf('function requestLogText');
 const reqEnd = src.indexOf('function fmtBytes');
-if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd].some(v => v < 0)) throw new Error('request log helpers not found');
+const tStart = src.indexOf('function fmtLogTime');
+const tEnd = src.indexOf('function creditTimeText');
+if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd, tStart, tEnd].some(v => v < 0)) throw new Error('request log helpers not found');
 const ctx = { Date, Number, String, Math, RegExp, isNaN };
 vm.createContext(ctx);
 vm.runInContext(
-  src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(reqStart, reqEnd) +
+  src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(tStart, tEnd) + src.slice(reqStart, reqEnd) +
   '\nthis.requestLogText=requestLogText;',
   ctx
 );
@@ -270,9 +272,9 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("request log formatting node test failed: %v\n%s", err, out)
 	}
-	text := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-1"
-	noSource := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | — | — | 1.25s | 2.3k tok | 0.12 credit | req-3"
-	cached := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | 命中 98.1% | req-2"
+	text := "2026-09-28 14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-1"
+	noSource := "2026-09-28 14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | — | — | 1.25s | 2.3k tok | 0.12 credit | req-3"
+	cached := "2026-09-28 14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | 命中 98.1% | req-2"
 	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("request log formatting=%s want %s", out, want)
@@ -317,8 +319,8 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("credit history formatting node test failed: %v\n%s", err, out)
 	}
-	gain := "14:05:06 | 小明 | +100 | 1,400 | 余额 1,300 → 1,400"
-	loss := "14:05:06 | 89374120 | −30 | 1,370 | 余额 1,400 → 1,370"
+	gain := "2026-09-28 14:05:06 | 小明 | +100 | 1,400 | 余额 1,300 → 1,400"
+	loss := "2026-09-28 14:05:06 | 89374120 | −30 | 1,370 | 余额 1,400 → 1,370"
 	want := `{"gain":` + strconv.Quote(gain) + `,"loss":` + strconv.Quote(loss) +
 		`,"note":"2 条 · 净 +1,240","empty":"暂无积分变动记录"}`
 	if strings.TrimSpace(string(out)) != want {
