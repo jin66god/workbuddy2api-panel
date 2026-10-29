@@ -472,6 +472,7 @@ function renderAccounts(list) {
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (noGrowth ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
+        '<button class="xs ghost" data-a="remark" data-u="' + esc(s.uid) + '" title="给这个账号起个本机备注（只存浏览器）">备注</button>' +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
   };
@@ -558,6 +559,8 @@ $('accBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
+  // 行内「备注」只开本机编辑器，不打后端接口：提前返回，跳过下面的 disable 与 confirm。
+  if (a === 'remark') { openRemarks(u); return; }
   if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
   if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
   b.disabled = true;
@@ -3536,25 +3539,33 @@ function remarkFormRows() {
   }
   return rows;
 }
-function renderRemarkBody() {
+/* onlyUID 非空时只渲染该账号一行（账号池行内「备注」按钮走这条），避免为改一个号
+   在几十行里翻找。 */
+function renderRemarkBody(onlyUID) {
   const box = $('remarkBody');
   if (!box) return;
-  const rows = remarkFormRows();
+  let rows = remarkFormRows();
+  if (onlyUID) {
+    const k = remarkKey(onlyUID);
+    rows = rows.filter(r => r.uid === k);
+  }
   box.innerHTML = rows.length
     ? rows.map(r => '<div class="rm-row"><span class="rm-who" title="' + esc(r.who) + '">' + esc(r.who) + '</span>' +
         '<input type="text" data-uid="' + esc(r.uid) + '" value="' + esc(remarksAll()[r.uid] || '') + '" placeholder="备注（留空即清除）" maxlength="24"></div>').join('')
     : '<div class="empty">暂无账号：先在「账号池」加载一次账号列表。</div>';
 }
-function openRemarks() {
-  renderRemarkBody();
+function openRemarks(onlyUID) {
+  renderRemarkBody(typeof onlyUID === 'string' ? onlyUID : '');
   if ($('remarkVeil')) $('remarkVeil').classList.add('on');
 }
 function closeRemarks() { if ($('remarkVeil')) $('remarkVeil').classList.remove('on'); }
 function saveRemarkForm() {
-  const map = {};
+  // 在现有映射上合并：单账号编辑器里只有一行，整体替换会把其它号的备注全清掉。
+  const map = Object.assign({}, remarksAll());
   document.querySelectorAll('#remarkBody input[data-uid]').forEach(inp => {
-    const v = inp.value.trim();
-    if (v) map[inp.getAttribute('data-uid')] = v;
+    const k = inp.getAttribute('data-uid'), v = inp.value.trim();
+    if (v) map[k] = v;
+    else delete map[k];
   });
   const saved = storeRemarks(map);
   closeRemarks();
@@ -3563,7 +3574,7 @@ function saveRemarkForm() {
   else if (view === 'usage' && usageData) renderUsage(usageData);
   toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
 }
-if ($('btnRemarks')) $('btnRemarks').onclick = openRemarks;
+if ($('btnRemarks')) $('btnRemarks').onclick = () => openRemarks('');
 if ($('btnRemarkClose')) $('btnRemarkClose').onclick = closeRemarks;
 if ($('btnRemarkClear')) $('btnRemarkClear').onclick = () => {
   if (!storeRemarks({})) toast('清空未能写入浏览器存储，刷新后备注会回来', 'err');

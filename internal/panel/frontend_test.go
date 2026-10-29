@@ -1394,6 +1394,23 @@ func TestPanelRemarkAndFoldWiring(t *testing.T) {
 			t.Fatalf("index.html 缺少 %s", want)
 		}
 	}
+	// 行内「备注」：按钮 + 分发 + 单账号过滤 + 合并保存。少任一处，行内按钮点了没反应
+	// 或保存时把其它账号的备注清空（整体替换 map 的老实现）。
+	remarkJS, remarkErr := os.ReadFile("app.js")
+	if remarkErr != nil {
+		t.Fatal(remarkErr)
+	}
+	for _, want := range []string{
+		`data-a="remark"`,
+		`if (a === 'remark') { openRemarks(u); return; }`,
+		`function renderRemarkBody(onlyUID)`,
+		`const map = Object.assign({}, remarksAll());`,
+		`onclick = () => openRemarks('')`,
+	} {
+		if !bytes.Contains(remarkJS, []byte(want)) {
+			t.Fatalf("app.js 缺少 %s", want)
+		}
+	}
 	// 折叠容器默认必须可见：列表一旦带上 hidden，点「检查」就看不到结果了。
 	for _, line := range strings.Split(string(html), "\n") {
 		if strings.Contains(line, `id="expPad"`) && strings.Contains(line, "hidden") {
