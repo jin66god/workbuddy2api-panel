@@ -353,6 +353,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if p.floorBlockedForRealmModel(e, model, realm, now) {
 			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
+		if e.modelCooled(now, model) {
+			// 模型级冷却（6004 / 手动停牌）不写账号级 until，而兜底只看 coolKind/until：
+			// 不判这一条，刚被 6004 停车的号会被兜底立刻「捞回来」再打一次必败请求，
+			// 手动模型停牌同样被绕过。兜底是最后一道选号路径，前面挡不住就等于没挡。
+			continue
+		}
 		if p.inFlightFull(e) {
 			continue
 		}
