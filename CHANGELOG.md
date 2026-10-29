@@ -3,6 +3,20 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.22.2（2026-10-30）
+
+### 修复
+
+- **Cloudflare 520/522/524 回源失败不再误罚全池**：这类错误是「网关 → 源站」一跳故障，
+  与账号无关。此前按通用 5xx 喂连续失败计数，3 次即可把共用同一入口的健康号全部熔断 1 小时，
+  且每个请求都会轮转 N 个号白撞。现识别为独立 `gateway_down`：零惩罚、不轮转，
+  立即返回 `503 upstream_gateway_error` + `Retry-After: 30`。
+- **网关错误页摘要化**：7KB CF HTML 不再进 `error.message` 与运行日志，改为
+  `Cloudflare 520: origin returned an empty/invalid response host=… ray=…`；
+  `ray` 优先取 `Cf-Ray` 响应头，便于对照 CF 支持与源站访问日志。
+- **计费维护类调用**（签到 / 余额）对 `gateway_down` 保留有界重试（源站瞬时重启可自愈），
+  chat 主链路仍 fail-fast 不重试。
+
 ## v1.22.1（2026-10-29）
 
 ### 修复

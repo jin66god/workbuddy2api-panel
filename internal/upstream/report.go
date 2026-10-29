@@ -75,7 +75,7 @@ func isTransientBillingErr(err error) bool {
 	}
 	var ue *Error
 	if errors.As(err, &ue) {
-		return ue.Kind == ErrServer
+		return ue.Kind == ErrServer || ue.Kind == ErrGatewayDown
 	}
 	return true
 }

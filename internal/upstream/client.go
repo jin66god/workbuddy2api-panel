@@ -47,6 +47,7 @@ const (
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrUpstreamBusy                  // 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/队列满（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
 	ErrModelBusy                     // 14003「Model busy」模型后端间歇繁忙 → 只停(账号×模型)短窗口，不罚账号、照常换号
+	ErrGatewayDown                   // Cloudflare 520/522/524 等「边缘→源站」故障 → 零惩罚、不轮转，末端 503
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -80,6 +81,8 @@ func (k ErrKind) String() string {
 		return "upstream_busy"
 	case ErrModelBusy:
 		return "model_busy"
+	case ErrGatewayDown:
+		return "gateway_down"
 	case ErrAccountFault:
 		return "account_fault"
 	case ErrChannelRefused:
@@ -594,6 +597,83 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     拦截形态。判在通用 4xx 兜底**之前**：此前该形态落 ErrClient → 只换号不罚 →
 //     连环 403。带业务信封的 403 已被上方各层捕获，走不到本层。
 //  12. 内容策略/参数错误/其他 4xx —— 通用兜底。
+//
+// cloudflareGatewayCodes Cloudflare 专有的「边缘 ↔ 源站」错误码（RFC 未定义，只有 CF 用）。
+var cloudflareGatewayCodes = map[int]bool{
+	520: true, // 源站返回空/非法响应
+	521: true, // 源站拒绝连接
+	522: true, // 源站连接超时
+	523: true, // 源站不可达
+	524: true, // 源站响应超时（CF 边缘等待超限）
+	525: true, // SSL 握手失败
+	526: true, // 源站证书无效
+	527: true, // Railgun 错误
+	530: true, // 源站 DNS 解析失败
+}
+
+// isCloudflareGatewayError 识别 CF 回源失败页。判据两条：
+//   - 状态码在 CF 专有集合内，且 body 不是带 {"code":...} 信封的上游 JSON
+//     （520 也可能是别的反代自造，带信封说明是业务响应，按 ErrServer 处理）；
+//   - 或状态码 >=500 且 body 明确是 CF 错误页（cf-error-details /
+//     5xx-error-landing），覆盖 CF 把源站错误包装成 502 的形态。
+func isCloudflareGatewayError(status int, body string) bool {
+	if status < 500 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	cfPage := strings.Contains(lower, "cf-error-details") ||
+		strings.Contains(lower, "cloudflare.com/5xx-error-landing") ||
+		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "error code"))
+	if cloudflareGatewayCodes[status] {
+		if strings.Contains(body, `"code"`) && !cfPage {
+			return false // 上游自己的 5xx JSON，不是 CF 页
+		}
+		return true
+	}
+	return cfPage
+}
+
+// gatewayErrorSummary 把 CF 错误页压成一行可读摘要（host / 错误码 / ray）。
+// 原始 HTML 前 200 字符对客户端毫无信息量（"<!DOCTYPE html><!--[if lt IE 7]>"），
+// 还占日志与响应体积；ray 是运维找 CF 支持或对源站日志的唯一线索。
+func gatewayErrorSummary(status int, body string) string {
+	host, ray := "", ""
+	if m := regexp.MustCompile(`(?i)<title>\s*([^<|\s]+)\s*\|`).FindStringSubmatch(body); len(m) > 1 {
+		host = strings.TrimSpace(m[1])
+	}
+	if m := regexp.MustCompile(`(?i)(?:ray id|cf-ray)[:\s]*([0-9a-f]{8,}-[a-z]{2,})`).FindStringSubmatch(body); len(m) > 1 {
+		ray = m[1]
+	}
+	parts := []string{fmt.Sprintf("Cloudflare %d: origin returned an empty/invalid response", status)}
+	if host != "" {
+		parts = append(parts, "host="+host)
+	}
+	if ray != "" {
+		parts = append(parts, "ray="+ray)
+	}
+	return strings.Join(parts, " ")
+}
+
+// gatewayMsgFromResp 在 errorMsg 基础上补 CF-Ray 响应头：错误页 body 通常不回显
+// ray，而 ray 是运维找 CF 支持 / 对源站访问日志的唯一线索（body 里没有就从头上取）。
+func gatewayMsgFromResp(kind ErrKind, resp *http.Response, raw string) string {
+	msg := errorMsg(kind, resp.StatusCode, raw)
+	if kind == ErrGatewayDown && resp != nil {
+		if ray := strings.TrimSpace(resp.Header.Get("Cf-Ray")); ray != "" && !strings.Contains(msg, "ray=") {
+			msg += " ray=" + ray
+		}
+	}
+	return msg
+}
+
+// errorMsg 上游错误的对外 message：CF 网关页压成摘要，其余保留原文前 200 字符。
+func errorMsg(kind ErrKind, status int, raw string) string {
+	if kind == ErrGatewayDown {
+		return gatewayErrorSummary(status, raw)
+	}
+	return truncate(raw, 200)
+}
+
 func Classify(status int, body string) ErrKind {
 	// 11102「该后端无此模型」须最先判：它是「模型在后端不存在」的确定性答复，语义比
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 会被更宽的
@@ -692,6 +772,13 @@ func Classify(status int, body string) ErrKind {
 	}
 	if status == http.StatusNotFound {
 		return ErrNotFound
+	}
+	// Cloudflare 520/521/522/523/524/525/526/527/530 是**边缘 ↔ 源站**这一跳失败
+	// （源站空响应/拒绝连接/超时/证书错），不是上游业务 5xx。必须在通用 5xx 之前判：
+	// 所有账号共用同一入口域名，换号改变不了回源，按账号失败记账会把整池健康号
+	// 逐个推向熔断（阈值 3 次）——实测一次 520 窗口就能让全池停 1 小时。
+	if isCloudflareGatewayError(status, body) {
+		return ErrGatewayDown
 	}
 	if status >= 500 {
 		return ErrServer
@@ -1074,7 +1161,7 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: gatewayMsgFromResp(kind, resp, string(raw))}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -1340,14 +1427,14 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			}
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
-				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, errorMsg(kind, resp.StatusCode, string(raw)))
 			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
 			if kind == ErrNone {
 				return nil, resp.StatusCode, raw, nil
 			}
-			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: gatewayMsgFromResp(kind, resp, string(raw))}
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
 			}

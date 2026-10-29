@@ -1182,6 +1182,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// Cloudflare 520/522/524 回源失败：**不罚号不轮转**，立即 503 + 摘要。
+			// 所有账号共用同一个入口域名，换号只是把同一条失败路径重打 N 次，
+			// 还会把每个健康号各记一次连续失败（阈值 3 → 全池熔断 1h）。
+			if kind == upstream.ErrGatewayDown {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := ""
+				if uerr != nil {
+					msg = uerr.Msg
+				}
+				if strings.TrimSpace(msg) == "" {
+					msg = "upstream gateway error (Cloudflare 5xx): origin unreachable"
+				}
+				w.Header().Set("Retry-After", "30")
+				writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "upstream_gateway_error", msg,
+					h.hintOf(upstream.ErrGatewayDown, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusServiceUnavailable
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 401 token rejected（网关层，无业务信封）：与 12153 不同，本地
 			// expiresAt 未到时上游也可能提前吊销 token，refresh 有机会自愈。
 			// 每账号每请求强制刷新一次：成功 → 重排本号（不消耗换号名额）；
@@ -1474,6 +1494,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				code = "waf_ip_blocked"
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
+		case upstream.ErrGatewayDown:
+			// 防御路径（正常已在轮转循环内 fail-fast）：503 + 可重试语义。
+			code = "upstream_gateway_error"
+			msg = "upstream gateway error (Cloudflare 5xx): origin unreachable, retry after a short wait"
+			w.Header().Set("Retry-After", "30")
 		case upstream.ErrUpstreamBusy:
 			// 6021 queue.full 渠道级容量满载（防御路径：正常已在轮转循环内
 			// fail-fast 拦截）。503 + 可重试语义——上游原文（下方统一透传）
@@ -1800,6 +1825,9 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 账号本身健康：不冷却、不熔断、不累计错误计数，也不轮转（见 chat 循环的
 		// ErrChannelRefused 分支：直接透传上游原文回 400）。与 ErrContentBlocked
 		// 同待遇，由调用方决定是否终止轮转。
+	case upstream.ErrGatewayDown:
+		// CF 回源失败是渠道级故障：所有账号共用同一入口，换号改变不了回源。
+		// 零动作（不冷却/不熔断/不 NoteError），chat 循环已 fail-fast 终止轮转。
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)

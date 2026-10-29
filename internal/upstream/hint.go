@@ -63,6 +63,9 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 6021 queue.full：渠道级容量满载。措辞明确「不是账号问题、换号无意义」，
 		// 指引客户端等待后重试（SDK 指数退避天然适配）。
 		return "upstream capacity is full (queue.full); this is a channel-level issue, not an account problem; retry after a short wait"
+	case ErrGatewayDown:
+		// 520/522/524 是网关到源站这一跳失败，换号/换 token 都不会好转。
+		return "upstream gateway error (Cloudflare 5xx): the origin behind the gateway is unreachable or returned an invalid response; this is not an account problem — retry after a short wait"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:
