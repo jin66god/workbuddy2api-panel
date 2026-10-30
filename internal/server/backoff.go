@@ -7,6 +7,8 @@ import (
 	"context"
 	"math/rand/v2"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // rotateBackoffBase 轮转退避基数（对齐官方 intl CLI computeRequestRetryDelayMs
@@ -56,6 +58,29 @@ func backoffAfter(n int) time.Duration {
 	}
 	return jitterDur(d)
 }
+
+// slotWaitMax「号都在途占满」时请求内等待的上限。缺省与 14003 同一预算（10s），
+// 独立成 var 是为了让回归测试能把它调小，避免用例真等 10 秒。
+var slotWaitMax = modelBusyWaitMax
+
+// waitForSlot 在「号都在途占满」时等一个空名额：轮询 slotPoll，上限 slotWaitMax。
+// 返回 false = 客户端断连。等到名额、或池况变成别的原因（冷却/停牌/保底）都提前收手
+// ——由调用方重选一次定论。
+func waitForSlot(ctx context.Context, p *pool.Pool, model, realm string, tried map[string]bool) bool {
+	deadline := time.Now().Add(slotWaitMax)
+	for time.Now().Before(deadline) {
+		if !sleepCtx(ctx, slotPoll) {
+			return false
+		}
+		if !p.SlotWaitForRealm(model, realm, tried) {
+			return true
+		}
+	}
+	return true
+}
+
+// slotPoll 等在途名额的轮询间隔：名额是按请求收尾释放的，几十毫秒内必有一次，不必更密。
+const slotPoll = 50 * time.Millisecond
 
 // waitPast 等待到解封时刻：只在 d 之上加**正向**抖动（0 ~ +25%），绝不提前醒来。
 //

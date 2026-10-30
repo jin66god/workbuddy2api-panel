@@ -704,6 +704,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 14003 全池短冷却时的「请求内等一次」状态（issue #46）：
 	// busyWaited = 本请求已等过一次，最多只等一次，防止无限拖住客户端。
 	busyWaited := false
+	// slotWaited 本次请求是否已经为「号都在途占满」等过一轮名额（issue #117）。
+	slotWaited := false
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
@@ -958,6 +960,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				tried = map[string]bool{} // 等待后允许重新尝试全部账号
 				i--                       // 等待不计入换号次数
+				continue
+			}
+			// issue #117：全池该模型没号，但原因不是冷却而是**在途占满**时，等一个
+			// 名额再试一次。此前直接 503「all accounts are temporarily unavailable」，
+			// 而真实情况是并发把剩下的号打满 max_in_flight：两号池里一号撞 6004 锁
+			// 模型后只剩 3 个名额，第 4 个并发请求必然 503，其实几十毫秒后就有名额。
+			// 只等一次、不占在途名额；上限 modelBusyWaitMax（与 14003 同一预算）。
+			// 放在 14003 busy-wait 之后：那是有解封时刻的确定性等待，优先级更高。
+			if !slotWaited && h.cfg.Pool.SlotWaitForRealm(bareModel, realm, tried) {
+				slotWaited = true
+				log.Printf("INFO: [server] model=%s: all healthy accounts at in-flight cap, waiting up to %s then retry once (issue #117)",
+					bareModel, modelBusyWaitMax)
+				if !waitForSlot(r.Context(), h.cfg.Pool, bareModel, realm, tried) {
+					break // 客户端已断连：不必再等
+				}
+				i-- // 等待不算一次换号：槽位留给真正的尝试
 				continue
 			}
 			break
@@ -1400,6 +1418,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			// 调用方先走了（前置 CDN 回源超时、AsyncOpenAI 类客户端 timeout、用户点停止）：
+			// 上游当时还在正常输出，网关也没出错。此前一律记 502 upstream_parse，把别人掐断
+			// 报成上游故障——线上一天 11 次，全部恰好 total=15.0s、tok=-、do=1~3s（上游头已回、
+			// 正文还在流），src 全是 EdgeOne 回源节点。
+			// 实测（2026-10-29）：EdgeOne 回源默认 15s 超时，直连与非 EdgeOne 入口同请求 39.4s / 16.8s 均 200。
+			// 499 = nginx 的 client closed request，与真 5xx 一眼可分；不写响应体（连接已关）。
+			// 文案保留 err 原文（含 "context canceled"），错误汇总可据此归类为客户端中断。
+			if cerr := r.Context().Err(); cerr != nil {
+				log.Printf("WARN: [server] sync acct=%s model=%s: 调用方断开（%v），上游输出已丢弃（CDN 回源超时常见于 EdgeOne 默认 15s）",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, cerr)
+				st.status = 499
+				st.outcome = reqlog.OutcomeInterrupted
+				return
+			}
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway

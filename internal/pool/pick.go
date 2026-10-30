@@ -326,6 +326,39 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 	return v > 0
 }
 
+// SlotWaitForRealm 报告「此刻选不到号**只是**因为号都在途占满」：本域存在对该模型
+// 健康（未冷却/未停牌/积分保底未拦）、且本请求还没试过的账号，只是名额已满。
+// 这与「号在冷却」不同——后者要等到已知的解封时刻，前者只要有一个在途请求收尾就好，
+// 通常几十毫秒到几秒。调用方据此决定「等一个名额」还是直接 503（issue #117：两号池里
+// 一号撞 6004 锁模型后只剩 3 个名额，第 4 个并发请求必然 503，而它只差几百毫秒就有名额）。
+//
+// 只看 in-flight：health 成立与否由 healthyForModel 判（已含 disabled/paused/手动停牌/
+// 模型冷却）；积分保底挡住的号不算——等下去不会变好，不该让请求干耗。
+// tried 里已试过的号同样不算：本轮不会再选它，等它释放名额没有意义。
+func (p *Pool) SlotWaitForRealm(model, realm string, tried map[string]bool) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			return true
+		}
+	}
+	return false
+}
+
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。

@@ -1289,8 +1289,19 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	var out []map[string]any
 
+	// have 本账号任务 code 全集：mp 口径是默认口径的超集（见 upstream.ListTasksMP），
+	// 只有 mp 列表**读成功**才启用筛选；mp 读失败 → have 保持 nil，全部照旧跑。
+	// 为什么不能只用默认口径兜底：mp 专属任务（Sequential_Tasks_1 / school_season）不在
+	// 默认列表里，拿默认集合筛选会把它们全误跳过。
+	// 为什么还要并入默认口径：mp 万一漏码，默认口径里真实存在的任务不能被误跳。
+	var have map[string]bool
+	seenDefault := map[string]bool{}
+
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
 	if tasks, err := p.listTasksSoftRate(a, false); err == nil {
+		for _, t := range tasks {
+			seenDefault[t.TaskCode] = true
+		}
 		var codes []string
 		for _, t := range tasks {
 			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
@@ -1315,6 +1326,13 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 
 	// 阶段 0b：小程序口径任务单独接受（默认列表不含 mp 码；失败不阻塞）。
 	if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+		have = make(map[string]bool, len(mpTasks)+len(seenDefault))
+		for c := range seenDefault {
+			have[c] = true
+		}
+		for _, t := range mpTasks {
+			have[t.TaskCode] = true
+		}
 		var mpCodes []string
 		for _, t := range mpTasks {
 			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
@@ -1339,6 +1357,18 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 
 	for _, act := range autoActions {
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
+		// 本账号没有这个任务就跳过：不查询、不执行、不上报。
+		// 上游已下架的 4 个 code（Model_chat_GLM5.2 / Buddy_App_QQ / create_canvas /
+		// black_cat）在任何账号的任务列表里都不存在，此前每号每轮仍为它们跑一次查询 +
+		// 上报，26 个号合计每轮白打 100+ 次上游调用（还会撞软限流）。
+		// 结果行照旧输出 skipped，面板/任务视图与以前一致；过期任务到期后会从上游列表
+		// 消失，同一条判据自动覆盖，不另写 expired 判定。
+		if have != nil && !have[act.TaskCode] {
+			item["status"] = "skipped"
+			item["message"] = "该账号没有此任务"
+			out = append(out, item)
+			continue
+		}
 		before, err := p.taskByCode(a, act.TaskCode)
 		if err != nil {
 			item["status"] = "error"
