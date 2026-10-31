@@ -1067,16 +1067,19 @@ function reqCreditCell(e) {
 
 /* renderRequestTable 渲染请求记录表。来源列是这一版的重点：IP 用等宽字体方便扫，
    UA 单行截断（完整值在 title 里，行本身用 requestLogText 作 tooltip）。 */
+// reqRows 当前筛选后的行序（与表格 data-ev 下标一致）：点行看上下文时按它取事件。
+let reqRows = [];
 function renderRequestTable() {
   const list = reqEntries.filter(e => reqMatch(e));
   const tb = $('reqBody');
   if (!tb) return;
-  tb.innerHTML = list.map(e => {
+  reqRows = list;
+  tb.innerHTML = list.map((e, i) => {
     const when = fmtLogTime(e && e.time) || '—';
     const ip = e && e.client_ip ? e.client_ip : '';
     const ua = e && e.user_agent ? e.user_agent : '';
     const rid = e && e.request_id ? e.request_id : '';
-    return '<tr title="' + esc(requestLogText(e)) + '">' +
+    return '<tr data-ev="' + i + '" title="' + esc(requestLogText(e) + (e && e.context ? '\n（点击查看请求上下文）' : '')) + '">' +
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
       '<td>' + esc(e && e.model || '—') + '</td>' +
@@ -1120,6 +1123,33 @@ if ($('btnReqReload')) $('btnReqReload').onclick = loadLogs;
 if ($('reqRange')) trangeBind('reqRange', loadLogs, '0');
 if ($('creditLimit')) $('creditLimit').onchange = loadCreditHistory;
 if ($('btnCreditReload')) $('btnCreditReload').onclick = loadCreditHistory;
+
+/* 请求上下文（logging.request_archive_context）：只认 archiveContext 写出的三种键
+   （system / messages / prompt）。content 是数组的多模态块原样 JSON 展示——拆开
+   反而丢掉结构。开关关闭或旧归档没有该字段时给出可操作的说明，不留空白。 */
+function renderReqContext(ctx) {
+  if (!ctx) return '<div class="ev-ctx-empty">本次请求没有记录上下文（在「配置 → 日志」打开「记录请求上下文」后新产生的请求才有）</div>';
+  const textOf = c => typeof c === 'string' ? c : (c == null ? '' : JSON.stringify(c, null, 2));
+  const block = (role, text) => '<div class="ev-ctx-msg"><span class="ev-ctx-role">' + esc(role) + '</span><pre>' + esc(text) + '</pre></div>';
+  const parts = [];
+  if (ctx.system != null) parts.push(block('system', textOf(ctx.system)));
+  if (ctx.prompt != null) parts.push(block('prompt', textOf(ctx.prompt)));
+  (ctx.messages || []).forEach(m => parts.push(block((m && m.role) || '?', textOf(m && m.content))));
+  return '<div class="ev-ctx">' + parts.join('') + '</div>';
+}
+// 事件行点击打开上下文弹窗。挂 tbody 一次，重渲染后照样有效。
+if ($('reqBody')) $('reqBody').onclick = ev => {
+  const tr = ev.target.closest('tr[data-ev]');
+  if (!tr || !$('reqCtxVeil')) return;
+  const e = reqRows[Number(tr.dataset.ev)] || {};
+  // 标题带上请求身份：弹窗遮住表格后，否则看不出打开的是哪一条。
+  $('reqCtxHint').textContent = [fmtLogTime(e.time) || '', e.path, e.model].filter(Boolean).join(' · ');
+  setHTML($('reqCtxBody'), renderReqContext(e.context));
+  $('reqCtxVeil').classList.add('on');
+};
+if ($('btnReqCtxClose')) $('btnReqCtxClose').onclick = () => $('reqCtxVeil').classList.remove('on');
+// 点遮罩关闭（与其它弹窗一致：只在点在 veil 自身时关，点内容不关）。
+if ($('reqCtxVeil')) $('reqCtxVeil').onclick = ev => { if (ev.target === $('reqCtxVeil')) $('reqCtxVeil').classList.remove('on'); };
 
 function requestLogText(e) {
   const when = fmtLogTime(e && e.time) || '—';
@@ -1206,6 +1236,7 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  request_archive_context: ['logging', 'request_archive_context'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *

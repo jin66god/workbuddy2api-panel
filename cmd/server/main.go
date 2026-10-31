@@ -301,6 +301,7 @@ func main() {
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
+		RecordContext:        cfg.Logging.RequestArchiveContext,
 		HiddenModels:         livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
@@ -593,6 +594,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
+		RecordContext:        newCfg.Logging.RequestArchiveContext,
 		HiddenModels:         livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)

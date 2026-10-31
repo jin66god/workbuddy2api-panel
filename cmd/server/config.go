@@ -57,6 +57,14 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+		// RequestArchiveContext 是否把会话上下文（system + messages / 出图 prompt）
+		// 记入请求事件，面板「请求记录」点行即可看当轮发出去的内容。缺省 false。
+		//
+		// 为什么默认关：这是**用户提示词**，比 IP 敏感一个量级——开了等于把每次对话
+		// 的原文落到 state 目录的归档文件里（保留 7 天、上限 100MiB）。排查「上游为什么
+		// 拒这条请求」时它是唯一能对上的证据，但那该是运维主动开的临时手段。
+		// 热生效（经 livecfg 快照），无需重启。
+		RequestArchiveContext bool `json:"request_archive_context"`
 	} `json:"logging"`
 
 	Server struct {
