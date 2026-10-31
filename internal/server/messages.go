@@ -122,11 +122,23 @@ func extractMessagesQuery(items []messagesTurnItem) string {
 }
 
 // messagesSearchResultItem 响应里 `web_search_tool_result.content[]` 的单项。
-// 注意：Anthropic 原生不带 snippet，摘要走 text 块的 citations，故这里只有 url/title。
+// 注意：Anthropic 原生不带 snippet，摘要走 text 块的 citations，故这里没有摘要字段。
+//
+// 字段纪律（对齐官方响应实况与官方 SDK 的 WebSearchResultBlock）：
+//   - type/url/title：原样带；
+//   - encrypted_content：**必填 string**（SDK 类型无 ?）。网关的检索结果来自上游
+//     agenttool 明文，没有可回传的密文，故给空串——「不加密的空内容」在协议上合法。
+//     **不能省略**：客户端 schema 是 required，缺字段会让整条 web_search_tool_result
+//     块判非法，表现为「联网搜索这次调用直接失败」（AI SDK 报
+//     AI_TypeValidationError: expected string, received undefined）。
+//   - page_age：可空（SDK 类型是 string | null），上游不提供该信息，显式给 null，
+//     让出站块形状固定、便于排查。
 type messagesSearchResultItem struct {
-	Type  string `json:"type"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
+	Type             string  `json:"type"`
+	URL              string  `json:"url"`
+	Title            string  `json:"title,omitempty"`
+	EncryptedContent string  `json:"encrypted_content"`
+	PageAge          *string `json:"page_age"`
 }
 
 // messagesToolResultBlock 搜索结果块。
@@ -185,9 +197,11 @@ func buildMessagesSearchResponse(query, model string, out *upstream.SearchOutcom
 			title = r.URL // 无标题时用 URL 兜底，客户端渲染 title ?? hostname 才不会空
 		}
 		items = append(items, messagesSearchResultItem{
-			Type:  "web_search_result",
-			URL:   r.URL,
-			Title: title,
+			Type:             "web_search_result",
+			URL:              r.URL,
+			Title:            title,
+			EncryptedContent: "",   // 必填 string，明文检索没有可回传的密文
+			PageAge:          nil,  // 可空：上游不提供更新时间
 		})
 		if r.Snippet != "" {
 			citations = append(citations, messagesCitation{

@@ -339,3 +339,56 @@ func TestMessagesResponseIDsAreUnique(t *testing.T) {
 		t.Errorf("msg id=%q want msg_wb2api_ 前缀", a.ID)
 	}
 }
+
+// TestMessagesSearchResultFieldContract 断言每条 web_search_result 都带齐官方
+// WebSearchResultBlock 的必填字段：encrypted_content 必须是 string（空串合法，
+// 但键不能省），page_age 键存在且值为 null/string。
+//
+// 回归位：这两个字段曾漏发，官方 SDK 的 schema 把 encrypted_content 定为必填，
+// 缺字段会让整条 web_search_tool_result 块判非法 → 客户端联网搜索整次失败
+// （AI SDK 报 AI_TypeValidationError: expected string, received undefined）。
+func TestMessagesSearchResultFieldContract(t *testing.T) {
+	up := newSearchUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"query":"golang","type":"text2text","provider":"0",
+			"results":[{"title":"Go 官网","url":"https://go.dev","snippet":"摘要一"},
+			           {"title":"","url":"https://example.com/x","snippet":""}],
+			"total_results":2,"response_time_ms":100}`))
+	})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream: up})
+	rec := doMessages(t, h, "", messagesBody("Perform a web search for the query: golang", true))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Content []struct {
+			Type    string           `json:"type"`
+			Content []map[string]any `json:"content"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("response must be JSON: %v", err)
+	}
+	checked := 0
+	for _, b := range out.Content {
+		if b.Type != "web_search_tool_result" {
+			continue
+		}
+		for i, it := range b.Content {
+			v, ok := it["encrypted_content"]
+			if !ok {
+				t.Fatalf("第 %d 项缺 encrypted_content（官方 schema 必填，缺了客户端解析整块失败）: %v", i, it)
+			}
+			if _, ok := v.(string); !ok {
+				t.Fatalf("第 %d 项 encrypted_content 不是 string: %#v", i, v)
+			}
+			if _, ok := it["page_age"]; !ok {
+				t.Fatalf("第 %d 项缺 page_age（应为 null）: %v", i, it)
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("没有校验到任何 web_search_result 项")
+	}
+}

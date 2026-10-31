@@ -18,9 +18,11 @@ const (
 	// 白名单头组的 X-IDE-Version）。对齐 CN 官方桌面端 5.8.3（2026-10-20 真机抓包）。
 	// config upstream.client_version 可覆盖（空 = 内置默认，CN/global 共用覆盖值）。
 	defaultClientVersion = "5.9.3"
-	// defaultGlobalClientVersion 国际版官方客户端版本。两版发版节奏不同（CN 5.8.3 /
-	// global 5.8.4），共用一个值会让国际版号的 UA 对不上当前分发包。
-	defaultGlobalClientVersion = "5.8.4"
+	// defaultGlobalClientVersion 国际版官方客户端版本。两版发版节奏不同（CN 5.9.3 /
+	// global 5.9.4），共用一个值会让国际版号的 UA 对不上当前分发包。
+	// 5.9.4 取值证据（2026-10-30 拆包 + 真机抓包）：app.asar/package.json version、
+	// cli/product.json genieVersion、真机 UA / X-IDE-Version 三处一致。
+	defaultGlobalClientVersion = "5.9.4"
 	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.161.0）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
 	defaultCliVersion = "2.165.0"
@@ -232,12 +234,12 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 			req.Header.Set("X-API-Key", at)
 		}
 	} else {
-		req.Header.Set("X-No-Authorization", "1")
+		req.Header.Set("X-No-Authorization", "true")
 	}
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	} else {
-		req.Header.Set("X-No-User-Id", "1")
+		req.Header.Set("X-No-User-Id", "true")
 	}
 	// 安全红线：绝不在 chat 请求里携带 X-Refresh-Token。
 	// 企业与域头按 realm 分发：CN 走既有分支（EnterpriseID/Domain 原样透传，缺省 X-No-*）；
@@ -248,12 +250,12 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 		if a.EnterpriseID != "" {
 			req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 		} else {
-			req.Header.Set("X-No-Enterprise-Id", "1")
+			req.Header.Set("X-No-Enterprise-Id", "true")
 		}
 		if d := a.DomainValue(); d != "" {
 			req.Header.Set("X-Domain", d)
 		} else {
-			req.Header.Set("X-No-Department-Info", "1")
+			req.Header.Set("X-No-Department-Info", "true")
 		}
 	} else {
 		c.injectGlobalChatHeaders(req, a)
@@ -279,7 +281,7 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 	if a == nil || !a.IsGlobal() {
 		return
 	}
-	req.Header.Set("X-No-Enterprise-Id", "1")
+	req.Header.Set("X-No-Enterprise-Id", "true")
 	req.Header.Set("X-Domain", "www.workbuddy.ai")
 	req.Header.Set("X-Private-Data", "true")
 }
