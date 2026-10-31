@@ -194,6 +194,11 @@ type modelCostEntry struct {
 	CostPer1k float64
 	LastSeen  time.Time
 	Samples   int
+	// WinTokens / WinStart 本窗口（pool.balance_window）内该 (账号, 模型) 已消费的
+	// token 累计与窗口起点。运行态，**不持久化**：窗口边界跨进程没有意义，重启即
+	// 重新计量（路由运行态与 lastUsed/usedSeq 同口径）。
+	WinTokens int64
+	WinStart  time.Time
 }
 type entry struct {
 	a            *auth.Auth
@@ -283,6 +288,23 @@ type entry struct {
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
+// windowTokens 返回该账号在该模型上本窗口已消费的 token 数（balance_window 调度用）。
+// 窗口按「从窗口内首次记账起算」的翻滚窗口：距 WinStart 已超过 window 时视为翻篇，
+// 返回 0（下一次 NoteModelCost 会重置）。window<=0（功能关停）恒返回 0。
+func (e *entry) windowTokens(model string, window time.Duration, now time.Time) int64 {
+	if window <= 0 || model == "" || len(e.modelCost) == 0 {
+		return 0
+	}
+	mc, ok := e.modelCost[model]
+	if !ok || mc.WinStart.IsZero() {
+		return 0
+	}
+	if now.Sub(mc.WinStart) >= window {
+		return 0
+	}
+	return mc.WinTokens
+}
+
 func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) {
 	if model == "" || len(e.modelCost) == 0 {
 		return modelCostEntry{}, false

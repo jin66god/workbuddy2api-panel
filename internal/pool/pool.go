@@ -30,6 +30,11 @@ type Pool struct {
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
 	// 0 = 关停（完全回到现状行为）。
 	costExploreInterval time.Duration
+	// balanceWindow 窗口用量调度窗口（SetBalanceWindow 注入；默认 defaultBalanceWindow
+	// 1h；0 = 关停）。按 (账号, 模型) 在该窗口内已消费 token 反比降权，把热点号
+	// 打散，避免一个号烧到模型限额而同期其他号闲置。软降权：保底/优先级/占比这些
+	// 硬语义不受影响。
+	balanceWindow time.Duration
 	// exploreLast 各 (realm, 模型) 的上次探索时刻，键 = realm + "\x1f" + model。
 	// 运行态（不持久化，同 lastUsed/usedSeq 口径）：重启归零 → 每个仍冻结的
 	// (域, 模型) 多至 1 次即时重探；已毕业号经 ModelCosts 恢复 tier，学费不重付。
@@ -154,6 +159,16 @@ func (p *Pool) SetSoftRateMax(d time.Duration) {
 // issue #136）。0 = 关停（完全回到现状行为）；正值覆盖默认 30m。
 // 注意：与 SetSoftRateMax「非正值保留默认」不同，0 在这里是**合法值**（关停开关，
 // 与 config 的 "0" 关停语义对齐）——不设 0 语义就无法关停探索。
+// SetBalanceWindow 设置窗口用量调度窗口（0 = 关停；负值非法保留现值）。
+func (p *Pool) SetBalanceWindow(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d < 0 {
+		return
+	}
+	p.balanceWindow = d
+}
+
 func (p *Pool) SetCostExploreInterval(d time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

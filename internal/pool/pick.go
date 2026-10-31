@@ -182,6 +182,22 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
 		}
 	}
+	// 窗口用量调度（pool.balance_window）：按 (账号, 模型) 在本窗口内已花的 token
+	// 反比降权，权重 /= 1 + used/mean。分母取**同层均值**而不是固定阈值：量纲自洽，
+	// 换池子规模、换模型倍率都不用调参；全员 0 用量时除数恒 1，行为与关闭时一致。
+	// 两处都要套（top5 排序 + 实际抽签），否则 penalty 只影响谁进短名单、不影响
+	// 抽签概率。只降权不排除——本功能是「打散热点」，不是限流；保底/优先级/占比的
+	// 硬语义不受影响。
+	var uctx usageCtx
+	if p.balanceWindow > 0 {
+		uctx = usageCtx{model: reqModel, n: len(ws)}
+		for _, w := range ws {
+			uctx.sum += w.e.windowTokens(reqModel, p.balanceWindow, now)
+		}
+		for i := range ws {
+			ws[i].w = p.routingWeightOf(ws[i].e, maxCredits, now) / p.usageDiv(ws[i].e, uctx, now)
+		}
+	}
 	if strategy := p.strategyForRealmLocked(realm); strategy != WeightedRandom {
 		ordered := make([]*entry, 0, len(ws))
 		for _, w := range ws {
@@ -259,7 +275,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
+		e = p.pickWeighted(eligible, uctx) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -431,6 +447,26 @@ func (p *Pool) inFlightFull(e *entry) bool {
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond
 
+// usageCtx 一次 pick 的窗口用量归一上下文（同一成本层内的均值口径）。
+// sum = 层内 token 用量总和，n = 层内账号数；sum 为 0 表示本层本窗口无用量账。
+type usageCtx struct {
+	model string
+	sum   int64
+	n     int
+}
+
+// usageDiv 窗口用量降权除数 = 1 + used/mean（mean = sum/n）。调用方用**除**：
+// 权重除以它即「用得越多权重越低」。未开启调度或本层零用量时恒 1（恒等元）。
+// 只降权不排除——极端热点权重会趋近 0 但永不为 0；需要硬隔离请用账号优先级/占比。
+// 调用方必须已持有 p.mu。
+func (p *Pool) usageDiv(e *entry, u usageCtx, now time.Time) float64 {
+	if u.sum <= 0 || u.n <= 0 || p.balanceWindow <= 0 {
+		return 1
+	}
+	used := float64(e.windowTokens(u.model, p.balanceWindow, now))
+	return 1 + used*float64(u.n)/float64(u.sum)
+}
+
 // pickWeighted 加权随机（claude-api selectWeightedRandom 参考口径）：
 //
 //		weight = credits 比例 × 10 + idleWeight
@@ -441,7 +477,7 @@ var minPickGap = 100 * time.Millisecond
 // credits 全 0 时仍按 idleWeight 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
-func (p *Pool) pickWeighted(cands []*entry) *entry {
+func (p *Pool) pickWeighted(cands []*entry, uctx usageCtx) *entry {
 	now := time.Now()
 	var maxCredits int64
 	for _, e := range cands {
@@ -453,7 +489,7 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	weights := make([]int64, len(cands))
 	var total int64
 	for i, e := range cands {
-		w := p.routingWeightOf(e, maxCredits, now)
+		w := p.routingWeightOf(e, maxCredits, now) / p.usageDiv(e, uctx, now)
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}

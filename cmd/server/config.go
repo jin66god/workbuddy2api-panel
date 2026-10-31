@@ -283,6 +283,11 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// BalanceWindow 窗口用量调度窗口：按 (账号, 模型) 在该窗口内累计消费的
+		// token 反比降权，把热点号打散，避免一个号烧到模型限额而同期其他号闲置。
+		// 默认 "1h"；"0" 关停（完全回到现状行为）；空值回落默认。软降权，
+		// 保底/优先级/占比的硬语义不受影响。
+		BalanceWindow string `json:"balance_window"`
 		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型（tier 2）不再
 		// 参与选号——防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
@@ -312,6 +317,8 @@ type Config struct {
 	KeepaliveRefreshWindowDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// BalanceWindowDur 解析后的窗口用量调度窗口；0 = 关停。
+	BalanceWindowDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
 	// ShutdownTimeoutDur 解析后的优雅关停窗口；0 = 不等待在途请求直接退。
@@ -403,6 +410,8 @@ func Default() *Config {
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	// 窗口用量调度默认 1h（热点号降权，把流量摊给闲置号）；"0" 关停。
+	c.Pool.BalanceWindow = "1h"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -671,6 +680,15 @@ func (c *Config) normalize() error {
 	//（"−5m" 无合理语义）。
 	if c.Pool.CostExploreInterval == "" {
 		c.Pool.CostExploreInterval = "30m"
+	}
+	if c.Pool.BalanceWindow == "" {
+		c.Pool.BalanceWindow = "1h"
+	}
+	if c.BalanceWindowDur, err = time.ParseDuration(c.Pool.BalanceWindow); err != nil {
+		return fmt.Errorf("pool.balance_window: %w", err)
+	}
+	if c.BalanceWindowDur < 0 {
+		c.BalanceWindowDur = 0
 	}
 	if c.CostExploreIntervalDur, err = time.ParseDuration(c.Pool.CostExploreInterval); err != nil {
 		return fmt.Errorf("pool.cost_explore_interval: %w", err)

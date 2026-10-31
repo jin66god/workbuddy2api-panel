@@ -280,7 +280,8 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	const alpha = 0.3
 	prev, seen := e.modelCost[model]
 	if !seen {
-		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1}
+		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1,
+			WinTokens: prev.WinTokens, WinStart: prev.WinStart}
 	} else {
 		// 限免结束事件（判定在写入口，只看覆盖前值）：此前 tier 0（实测免费，
 		// per1k≤0）且本次实测收费（per1k>0）——账号在该模型上的免费窗口结束。
@@ -291,7 +292,24 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 			CostPer1k: prev.CostPer1k*(1-alpha) + per1k*alpha,
 			LastSeen:  time.Now(),
 			Samples:   prev.Samples + 1,
+			// 窗口字段必须原样带过来：这条台账整体重写，丢了就等于每次记账把
+			// 本窗口累计清零（只剩最后一次的 token，降权形同虚设）。
+			WinTokens: prev.WinTokens,
+			WinStart:  prev.WinStart,
 		}
+	}
+	// 窗口用量记账（pool.balance_window，默认 1h；0 = 关停不记账）：同一份台账里
+	// 顺手累加 token，不新建表、不新开 goroutine。窗口按首次记账起算整体翻篇。
+	// 必须在单价台账写完之后再做——上面两处会整体覆盖 modelCostEntry，先写会被冲掉。
+	if p.balanceWindow > 0 {
+		now := time.Now()
+		mc := e.modelCost[model]
+		if mc.WinStart.IsZero() || now.Sub(mc.WinStart) >= p.balanceWindow {
+			mc.WinStart = now
+			mc.WinTokens = 0
+		}
+		mc.WinTokens += int64(tokens)
+		e.modelCost[model] = mc
 	}
 	p.dirty.Store(true) // 账本已持久化：写入口统一置脏
 }
