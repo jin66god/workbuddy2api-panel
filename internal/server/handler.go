@@ -493,12 +493,17 @@ func (h *Handler) modelList() []map[string]any {
 		entry = applyModelInfoFields(entry, mi)
 		// effort 能力透出——远端 supportedEfforts 权威，缺失落到 CN 静态兜底表
 		// （客户端可发现档位，不再盲传）。无档位 → 省略字段。
-		if efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
+		efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort)
+		if efforts != nil {
 			entry["reasoning_supported_efforts"] = efforts
 			if def != "" {
 				entry["reasoning_default_effort"] = def
 			}
 		}
+		// models.dev 形状的能力声明（modalities/limit/tool_call/reasoning/
+		// reasoning_options）：纯追加，原有字段一个不动；给只认 models.dev 词表的
+		// 下游（magpie 等）一份读得懂的声明。见 applyModelsDevShape。
+		applyModelsDevShape(entry, mi, efforts, false)
 		out = append(out, entry)
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
@@ -527,20 +532,24 @@ func (h *Handler) modelList() []map[string]any {
 			}
 			// context_length / max_output_tokens 四级查找（与 CN 动态分支同口径）。
 			var remoteCtx, remoteOut int64
+			var gmi upstream.ModelInfo
 			if mi, ok := globalInfos[id]; ok {
 				entry = applyModelInfoFields(entry, mi)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
+				gmi = mi
 			}
 			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
 			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
 				entry["max_output_tokens"] = mo
 			}
-			if efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id]); efforts != nil {
-				entry["reasoning_supported_efforts"] = efforts
-				if def != "" {
-					entry["reasoning_default_effort"] = def
+			gefforts, gdef := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id])
+			if gefforts != nil {
+				entry["reasoning_supported_efforts"] = gefforts
+				if gdef != "" {
+					entry["reasoning_default_effort"] = gdef
 				}
 			}
+			applyModelsDevShape(entry, gmi, gefforts, false)
 			out = append(out, entry)
 		}
 	}
