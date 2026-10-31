@@ -93,7 +93,8 @@
     "mode": "passthrough",
     "file": "",
     "identity_override_enabled": false,
-    "identity_override_text": "You are CodeBuddy Code."
+    "identity_override_text": "You are CodeBuddy Code.",
+    "keep_recent_rounds": 0
   },
   "upstash": {
     "url": "",

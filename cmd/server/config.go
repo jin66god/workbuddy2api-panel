@@ -238,6 +238,11 @@ type Config struct {
 		IdentityOverrideEnabled bool `json:"identity_override_enabled"`
 		// IdentityOverrideText 替换后的首句；空值回落到 "You are CodeBuddy Code."。
 		IdentityOverrideText string `json:"identity_override_text"`
+		// KeepRecentRounds 出站前只保留最近 N 轮对话（一轮 = 一条 user 消息及其后的
+		// assistant/tool 回复），system 全留。0 = 关闭（全量透传，默认）。
+		// 长会话的输入 token 主要花在历史消息上；裁剪点落在整轮边界，不会切出半个
+		// tool 配对。热生效（面板保存即改 upstream.Client.KeepRecentRounds），无需重启。
+		KeepRecentRounds int `json:"keep_recent_rounds"`
 	} `json:"prompt"`
 
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
@@ -795,6 +800,10 @@ func (c *Config) normalizePrompt() error {
 	}
 	if strings.TrimSpace(c.Prompt.IdentityOverrideText) == "" {
 		c.Prompt.IdentityOverrideText = prompt.DefaultHarnessIdentity
+	}
+	// 历史裁剪轮数：负值钳 0（= 关闭）。0 是合法默认，无需空值回落。
+	if c.Prompt.KeepRecentRounds < 0 {
+		c.Prompt.KeepRecentRounds = 0
 	}
 	if c.Prompt.Mode == "custom" || c.Prompt.Mode == "append" {
 		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)

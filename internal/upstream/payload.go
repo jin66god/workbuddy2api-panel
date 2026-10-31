@@ -29,6 +29,16 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 // defaultEfforts（模型声明默认档）补档。defaultEfforts 为 nil 时与旧行为一致
 // （deepseek 缺档回退硬编码 high）。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
+	return PrepareBodyOptWithRounds(src, sanitize, efforts, defaultEfforts, 0)
+}
+
+// PrepareBodyOptWithRounds 在 …WithEffortsAndDefault 之上按 keepRounds 裁剪历史：
+// 只保留最近 N 轮对话（一轮 = 一条 user 消息及其后的 assistant/tool 回复），
+// system 全留；keepRounds <= 0 时与 …WithEffortsAndDefault 完全一致（默认关闭）。
+//
+// 为什么放在这一层而不是 handler：所有出站 chat 请求（面板/后台任务/搜索）
+// 都要经过 prepareBody，放这里才不会出现「网关自己发的请求不裁剪」的分叉。
+func PrepareBodyOptWithRounds(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string, keepRounds int) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -54,6 +64,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	dropReasoningContentParts(obj)
+	// 历史裁剪先于 tool 配对：cut 落在整轮边界（user 下标）上，不会切出半个
+	// tool 配对；万一客户端自己的历史本来就断了，后面三步照样兜底。
+	trimHistory(obj, keepRounds)
 	// tool 配对三步（见 tool_pairing.go）：先合并再重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
 	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
@@ -91,6 +104,42 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		return src
 	}
 	return out
+}
+
+// trimHistory 只保留最近 keep 轮对话：一轮 = 一条 user 消息，连同其后的
+// assistant/tool 回复。更早的整轮丢弃——长会话的输入 token 几乎全在这里。
+//
+// 三条约束：
+//   - system 消息一条不删（协议与人格，删了上游要么 400 要么人格丢失）；
+//     cut 之前出现的 system 也提到前面保留（客户端把 system 插在中间的情况）。
+//   - cut 只落在 user 下标上，保留段开头永远不是 tool 结果——不会切出半个
+//     tool 配对（配不成对上游直接 400）。
+//   - keep <= 0 时不动 body（默认关闭，与没有这个功能完全一致）。
+func trimHistory(obj map[string]any, keep int) {
+	if keep <= 0 {
+		return
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	users := make([]int, 0, 8)
+	for i, m := range msgs {
+		if mm, ok := m.(map[string]any); ok && mm["role"] == "user" {
+			users = append(users, i)
+		}
+	}
+	if len(users) <= keep {
+		return
+	}
+	cut := users[len(users)-keep]
+	kept := make([]any, 0, len(msgs)-cut+4)
+	for _, m := range msgs[:cut] {
+		if mm, ok := m.(map[string]any); ok && mm["role"] == "system" {
+			kept = append(kept, m)
+		}
+	}
+	obj["messages"] = append(kept, msgs[cut:]...)
 }
 
 // translateMaxCompletionTokens 把 OpenAI 别名 max_completion_tokens 翻译为上游

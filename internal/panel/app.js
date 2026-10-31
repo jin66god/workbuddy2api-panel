@@ -1200,6 +1200,7 @@ const CFG_MAP = {
   account_spread_minutes: ['schedule', 'account_spread_minutes'],
   account_spread_min_gap_seconds: ['schedule', 'account_spread_min_gap_seconds'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
+  keep_recent_rounds: ['prompt', 'keep_recent_rounds'],
   prompt_identity_override_enabled: ['prompt', 'identity_override_enabled'],
   prompt_identity_override_text: ['prompt', 'identity_override_text'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],

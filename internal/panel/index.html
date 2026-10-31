@@ -1199,6 +1199,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="prompt_identity_override_text" placeholder="You are CodeBuddy Code.">
                 <span class="hint">默认 You are CodeBuddy Code.；留空恢复默认；需重启</span></label>
             </div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">历史裁剪轮数</span>
+                <input type="number" min="0" step="1" name="keep_recent_rounds" placeholder="0">
+                <span class="hint">0 = 不裁剪（默认）；N = 出站前只保留最近 N 轮对话，system 全留；保存即热生效</span></label>
+              <div></div>
+            </div>
             <div class="hr"></div>
             <div class="switch"><span class="lb">出站请求指纹脱敏</span>
               <input type="checkbox" name="sanitize_blacklist_fingerprints"></div>
