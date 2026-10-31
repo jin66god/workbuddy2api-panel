@@ -3,6 +3,38 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.23.0（2026-10-31）
+
+### 新增
+
+- **历史裁剪（`prompt.keep_recent_rounds`，默认 0 = 关）**：出站前只保留最近 N 轮对话，
+  一轮 = 一条 user 消息及其后的 assistant/tool 回复，system 全留；裁剪点落在整轮边界，
+  不会切出半个 tool 配对。长会话的输入 token 主要花在历史消息上，面板「配置 → 提示词」
+  可改、保存即热生效。实测同一条 4 轮请求 prompt_tokens 958 → 38。
+- **窗口用量调度（`pool.balance_window`，默认 `1h`，`0` 关停）**：按 (账号, 模型) 在本窗口
+  内已消费的 token 反比降权（权重 `/= 1 + used/mean`，同成本层均值），把热点号打散，
+  避免一个号烧到模型限额而同期其他号闲置。软降权——积分保底、账号优先级、账号占比这些
+  硬语义不受影响；全员零用量时与旧行为一致。面板「配置 → 调度」可改、保存即热生效。
+- **请求上下文查看（`logging.request_archive_context`，默认关）**：开启后「请求记录」点行
+  弹窗显示当轮 system / messages 原文（16KB 预算，超长按最旧轮次收敛，始终是合法 JSON）。
+  提示词是用户数据，默认不落盘，需要排查「上游为什么拒这条请求」时临时打开即可。
+- **`/v1/models` 追加 models.dev 形状声明**：每条模型在原有字段之外追加 `modalities` /
+  `limit` / `tool_call` / `reasoning` / `reasoning_options`，并给 magpie 方言的
+  `supported_reasoning_levels`。只认这套词表的客户端（magpie 等）此前取不到看图与思考档位，
+  只能退化成纯文本模型；没有数据源的字段（cost / attachment / knowledge 等）一律不写。
+
+### 修复
+
+- **联网搜索的 `web_search_result` 补必填字段**：Anthropic 官方 SDK 把
+  `encrypted_content` 定为必填 string，此前只发 `type/url/title`，导致整条
+  `web_search_tool_result` 块被判非法、联网搜索整次调用失败（AI SDK 报
+  `AI_TypeValidationError: expected string, received undefined`）。现补 `encrypted_content`（空串，
+  明文检索没有可回传的密文）与 `page_age: null`。
+- **`X-No-*` 哨兵头改字符串 `true`**：`X-No-Authorization` / `X-No-User-Id` /
+  `X-No-Enterprise-Id` / `X-No-Department-Info` 此前发 `1`，与官方桌面端真机报文不符。
+- **国际版客户端版本对齐 5.9.4**：`WorkBuddy` 段与 `X-IDE-Version` 按国际分发包当前版本
+  取值（此前仍是 5.8.4），UA 形态与真机一致。
+
 ## v1.22.3（2026-10-30）
 
 ### 修复
