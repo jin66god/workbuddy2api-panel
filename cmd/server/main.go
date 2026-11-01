@@ -129,7 +129,7 @@ func main() {
 	p.SetDegrade(cfg.Pool.DegradeThreshold, cfg.DegradeCooldownDur, cfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
-	p.SetBalanceWindow(cfg.BalanceWindowDur)               // 窗口用量调度（默认 1h；0 关停）
+	p.SetBalanceWindow(cfg.BalanceWindowDur)             // 窗口用量调度（默认 1h；0 关停）
 	p.SetCreditFloor(cfg.Pool.CreditFloor)               // 积分保底（默认 0 = 关闭）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
@@ -604,9 +604,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	up.KeepRecentRounds.Store(int32(newCfg.Prompt.KeepRecentRounds)) // 历史裁剪热生效（0 = 关闭）
-	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
-	p.SetBalanceWindow(newCfg.BalanceWindowDur)             // 窗口用量调度热生效（0 关停）
-	p.SetCreditFloor(newCfg.Pool.CreditFloor)               // 积分保底热生效（0 = 关闭）
+	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur)          // costTier 探索窗口热生效（0 关停）
+	p.SetBalanceWindow(newCfg.BalanceWindowDur)                      // 窗口用量调度热生效（0 关停）
+	p.SetCreditFloor(newCfg.Pool.CreditFloor)                        // 积分保底热生效（0 = 关闭）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	_ = p.SetScheduling(newCfg.Pool.Strategy, newCfg.Pool.AccountOrder)
@@ -634,6 +634,10 @@ func applyCNChatBase(up *upstream.Client, cfg *Config) {
 	if cfg.CN.ChatBase != "" {
 		up.ChatBaseCN = cfg.CN.ChatBase
 	}
+	// 此前只装配了 chat base：面板即便填了 cn.billing_base 也不会生效（假配置）。
+	if cfg.CN.BillingBase != "" {
+		up.BillingBaseCN = cfg.CN.BillingBase
+	}
 }
 
 // restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
@@ -656,7 +660,7 @@ func restartRequiredFields(c *Config) []string {
 	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
 	out = append(out, "upstream.user_agent")
 	// cn.chat_base 同样只在装配期写进 up.ChatBaseCN（请求路径并发读取，不做热改）。
-	out = append(out, "cn.chat_base")
+	out = append(out, "cn.chat_base", "cn.billing_base", "global.chat_base", "global.billing_base")
 	if c.Upstash.URL != "" || c.Upstash.Token != "" {
 		out = append(out, "upstash")
 	}

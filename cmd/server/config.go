@@ -192,6 +192,9 @@ type Config struct {
 		// Clash 全局 + TUN）的 TLS 握手直接复位，CN 模型目录与对话全部 EOF；需要
 		// 回退时用它填这个键（/v2/chat/completions、/v3/config、token refresh 均同构）。
 		ChatBase string `json:"chat_base"`
+		// BillingBase 国内版积分 / 成长任务上游 base 覆盖；空 = 回落内置默认
+		// https://www.codebuddy.cn（BillingBaseCN）。装配期写入 up.BillingBaseCN。
+		BillingBase string `json:"billing_base"`
 	} `json:"cn"`
 
 	Upstream struct {

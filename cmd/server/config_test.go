@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 func TestDefault(t *testing.T) {
@@ -947,5 +949,37 @@ func TestPeriodicJitterPermillConfig(t *testing.T) {
 	}
 	if c2.Schedule.BalanceRefreshJitterPermill != 250 || c2.Schedule.TaskSweepJitterPermill != 100 {
 		t.Fatalf("env override: %+v", c2.Schedule)
+	}
+}
+
+// TestApplyCNChatBase 分域 base 必须真的装配进上游 client：
+// 只加面板入口、不装配后端 = 用户填了也不生效（假配置）。
+func TestApplyCNChatBase(t *testing.T) {
+	up := upstream.New()
+	cfg := &Config{}
+	cfg.CN.ChatBase = "https://cn-chat.example"
+	cfg.CN.BillingBase = "https://cn-bill.example"
+	cfg.Global.ChatBase = "https://gl-chat.example"
+	cfg.Global.BillingBase = "https://gl-bill.example"
+
+	apply := func() {
+		applyCNChatBase(up, cfg)
+		up.ChatBaseGlobal = cfg.Global.ChatBase
+		up.BillingBaseGlobal = cfg.Global.BillingBase
+	}
+	apply()
+	if up.ChatBaseCN != cfg.CN.ChatBase || up.BillingBaseCN != cfg.CN.BillingBase {
+		t.Fatalf("CN base 未装配：chat=%q billing=%q", up.ChatBaseCN, up.BillingBaseCN)
+	}
+	if up.ChatBaseGlobal != cfg.Global.ChatBase || up.BillingBaseGlobal != cfg.Global.BillingBase {
+		t.Fatalf("global base 未装配：chat=%q billing=%q", up.ChatBaseGlobal, up.BillingBaseGlobal)
+	}
+
+	// 空值必须保留内置默认（老配置无该键时行为不变）。
+	up2 := upstream.New()
+	defChat, defBill := up2.ChatBaseCN, up2.BillingBaseCN
+	applyCNChatBase(up2, &Config{})
+	if up2.ChatBaseCN != defChat || up2.BillingBaseCN != defBill {
+		t.Fatalf("空值覆盖了内置默认：chat=%q billing=%q", up2.ChatBaseCN, up2.BillingBaseCN)
 	}
 }

@@ -1729,3 +1729,39 @@ func TestAccountRowRealmTagNotShrunk(t *testing.T) {
 		t.Error("国际版标签被写进了可收缩的名字区间")
 	}
 }
+
+// TestCfgRealmBaseFields 分域 base 必须四键齐全且都进 CFG_MAP / CLEARABLE_CFG /
+// 表单：只加后端字段不加面板入口 = 用户改不了；只加 CFG_MAP 不加 CLEARABLE 则
+// 清空后不会下发（想回落内置默认却清不掉）。
+func TestCfgRealmBaseFields(t *testing.T) {
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(js)
+	keys := []string{"cn_chat_base", "cn_billing_base", "global_chat_base", "global_billing_base"}
+	for _, k := range keys {
+		if !strings.Contains(src, k+": [") && !strings.Contains(src, "'"+k+"': [") {
+			t.Errorf("CFG_MAP 缺少 %s", k)
+		}
+	}
+	clr := regexp.MustCompile(`(?s)const CLEARABLE_CFG = new Set\(\[(.*?)\]\);`).FindStringSubmatch(src)
+	if clr == nil {
+		t.Fatal("找不到 CLEARABLE_CFG")
+	}
+	for _, k := range keys {
+		if !strings.Contains(clr[1], "'"+k+"'") {
+			t.Errorf("CLEARABLE_CFG 缺少 %s（清空后不会下发，回落默认失效）", k)
+		}
+	}
+
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	for _, k := range keys {
+		if n := strings.Count(string(html), `name="`+k+`"`); n != 1 {
+			t.Errorf("index.html 中 %s 的 input 数量 = %d want 1", k, n)
+		}
+	}
+}
