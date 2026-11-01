@@ -260,11 +260,19 @@ func DesktopAutomationCreateEvent(name string) DesktopEvent {
 	}
 }
 
-// ReportWebEvent 以 Web 端指纹向 www.workbuddy.cn/v2/report 上报单事件。
-// 与桌面指纹（copilot 域）不同：web 域事件是浏览器形状（os/machineId/userAgent），
-// 用于 Library_read 等页面行为类任务（实测 library_doc_intro_click 4 秒点亮）。
+// ReportWebEvent 以**官方 Node 形态**向 www.workbuddy.cn/v2/report 上报单事件。
+//
+// 2026-11-01 双版真机抓包：官方 /v2/report 在 CN 侧只有一种形态，11 个头，没有任何
+// 浏览器语义——没有 sec-ch-ua / Sec-Fetch-* / Origin / Referer / x-client-platform。
+// 旧实现造的是「Chrome/152 UA + Origin + Referer + x-client-platform: web」的第三族
+// 请求（Chrome/152 还是不可能的值：Electron 37 内置 Chromium 138），风控一撞就露。
+//
+// 注意别把两条链混为一谈：/console/account 与任务领奖端点**确实**带
+// x-client-platform: web，那是另一条链，删了必坏；只有 /v2/report 不带。
+//
+// 回滚：WB2_REPORT_LEGACY=1 恢复旧浏览器形态（仅用于「改形态后行为任务点不亮」时）。
 func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, elementName string) error {
-	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+	ua := c.userAgent(a)
 	ev := map[string]any{
 		"eventCode": eventCode, "timestamp": time.Now().UnixMilli(), "reportDelay": 0,
 		"pageURL": pageURL, "elementId": elementID, "elementName": elementName,
@@ -280,15 +288,32 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", c.webBase(a))
-	req.Header.Set("Referer", pageURL)
-	req.Header.Set("User-Agent", ua)
-	if a.UID != "" {
-		req.Header.Set("X-User-Id", a.UID)
+	if os.Getenv("WB2_REPORT_LEGACY") == "1" {
+		// 旧浏览器族（回滚用）：保留 Chrome UA + Origin/Referer + x-client-platform。
+		legacyUA := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+		req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("x-client-platform", "web")
+		req.Header.Set("Origin", c.webBase(a))
+		req.Header.Set("Referer", pageURL)
+		req.Header.Set("User-Agent", legacyUA)
+		if a.UID != "" {
+			req.Header.Set("X-User-Id", a.UID)
+		}
+	} else {
+		// 真机 11 头：无 Client Hints、无 Origin/Referer、无 x-client-platform。
+		// X-Request-ID 用纯随机 32 hex（真机 report 无时间位，与 chat 的 UUIDv7 不同规则）。
+		req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+		req.Header.Set("User-Agent", ua)
+		req.Header.Set("X-Domain", c.webBase(a))
+		req.Header.Set("X-Product", "SaaS")
+		req.Header.Set("X-Request-ID", hexToken(32))
+		if a.UID != "" {
+			req.Header.Set("X-User-Id", a.UID)
+		}
 	}
 	_, err = c.doJSON(req)
 	return err
