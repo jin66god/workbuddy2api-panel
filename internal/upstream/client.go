@@ -1153,7 +1153,37 @@ func (c *Client) webBase(a *auth.Auth) string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
+// applyConnectionHeader 官方每条 RPC 都显式写 Connection（7 份真机夹具里 6 份
+// keep-alive、/v3/config 是 close）。HTTP/1.1 里 keep-alive 是默认语义，Go 因此
+// **不会主动写这一行**——头集合看起来一致、wire 上却少一行，是最容易漏的一处。
+//
+// 只对抓包确证过的路径设置：没抓到的不臆造。chat 的 SSE 由 ChatStreamContext
+// 单独调用同一个 helper。
+func applyConnectionHeader(req *http.Request) {
+	if req == nil || req.URL == nil {
+		return
+	}
+	p := req.URL.Path
+	switch {
+	case p == "/v3/config":
+		// Go 对 Close 自己写 `Connection: close`，手写会重复一行。
+		req.Close = true
+	case strings.Contains(p, "/v2/chat/completions"),
+		strings.Contains(p, "/v2/chat/busy"),
+		strings.Contains(p, "/v2/report"):
+		req.Header.Set("Connection", "keep-alive")
+	}
+}
+
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
+	applyConnectionHeader(req)
+	// 官方真机四段编码（chat / report / billing / refresh 全链路同值）。显式声明会
+	// 关闭 net/http 的透明解压，故下方必须按 Content-Encoding 手动解；chat 的 SSE
+	// 长流不走这里，仍交回 Transport 自动 gzip（解压要动 monitorBody / idle / 首包
+	// 计时三处，风险远大于一个头的收益）。
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -1162,6 +1192,10 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
+	}
+	// 先解压再分类：400 分支若拿到压缩体，Classify 会把乱码当文本导致误罚号。
+	if raw, err = decodeResponseBody(resp.Header.Get("Content-Encoding"), raw); err != nil {
+		return nil, fmt.Errorf("decode body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
@@ -1405,6 +1439,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			return nil, 0, nil, err
 		}
 		c.ChatHeaders(req, a, clientIP, meta)
+		applyConnectionHeader(req)
 		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
