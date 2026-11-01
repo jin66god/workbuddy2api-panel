@@ -521,9 +521,11 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if c.ChatHTTP.Transport != c.HTTP.Transport {
 		t.Errorf("ChatHTTP and HTTP must share the same *http.Transport")
 	}
-	htr, ok := c.ChatHTTP.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("Transport type=%T", c.ChatHTTP.Transport)
+	// Transport 外层包了 headerCaseTripper（头名拼写纠正），连接层参数在内层
+	// *http.Transport 上；断言必须解包后再查，不能直接类型断言外层。
+	htr := underlyingTransport(c.ChatHTTP.Transport)
+	if htr == nil {
+		t.Fatalf("Transport type=%T（内层不是 *http.Transport）", c.ChatHTTP.Transport)
 	}
 	if htr.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
 		t.Errorf("ResponseHeaderTimeout=%v want 60s", htr.ResponseHeaderTimeout)
@@ -688,4 +690,19 @@ func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
 	if got := strings.Join(mi.Efforts, ","); got != "low,high,max" {
 		t.Errorf("Efforts=%v want low,high,max", mi.Efforts)
 	}
+}
+
+// underlyingTransport 剥掉 headerCaseTripper 包装，返回底层 *http.Transport。
+func underlyingTransport(rt http.RoundTripper) *http.Transport {
+	for rt != nil {
+		switch v := rt.(type) {
+		case *http.Transport:
+			return v
+		case headerCaseTripper:
+			rt = v.base
+		default:
+			return nil
+		}
+	}
+	return nil
 }

@@ -939,9 +939,12 @@ type CreditObserver func(uid string, credits int64)
 // kongjianguan 4 连击实测经验）。
 func New() *Client {
 	tr := newTransport()
+	// 头名拼写统一在 Transport 外层纠正（逐名映射，不是小写化）：本仓没有统一 do()
+	// 出口，13+ 个出站点挂一次比逐个改可靠。包装层转发 CloseIdleConnections。
+	rt := http.RoundTripper(headerCaseTripper{base: tr})
 	c := &Client{
-		HTTP:     &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP: &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		HTTP:     &http.Client{Timeout: 120 * time.Second, Transport: rt},
+		ChatHTTP: &http.Client{Timeout: 0, Transport: rt}, // 无总时长；首字节由 ResponseHeaderTimeout 管
 		// ChatBaseCN 取官方桌面端的 endpoint（product.json）：www.workbuddy.cn。
 		// copilot.tencent.com 是官方 NetworkFailover 里的备选入口，把它当主入口
 		// 是可判别的形态差异；且 copilot 对海外出口 TLS 握手会直接复位。
