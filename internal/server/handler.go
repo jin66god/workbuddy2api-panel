@@ -702,6 +702,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
 		// 让 stdout 流水行与归档事件共用同一份来源值，两处不会漂移。
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
+		// request_id 必须同步：不设它时 logChatRowEx 的
+		// `rid= | out= | try= | credit=` 整段不会输出，上游末帧 usage.credit
+		// （本次真实扣费）在流水里完全看不到，只能翻归档对 rid。归档与流水
+		// 共用同一个 trace.id，两处必须能对上。
+		st.requestID = tr.id
 	}
 	defer st.done()
 

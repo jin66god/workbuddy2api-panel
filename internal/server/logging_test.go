@@ -484,3 +484,39 @@ func TestHealthzDoesNotLogTableRow(t *testing.T) {
 		t.Errorf("healthz/models/status must not emit table rows:\n%s", out)
 	}
 }
+
+// TestChatLogRowCarriesRequestID chat 流水行必须带 rid= 段。
+//
+// chatStat.requestID 此前从未赋值，chat 行因此永远缺
+// `rid=... | out=... | try=... | credit=...` 这一整段：上游末帧 usage.credit
+// （本次真实扣费）在流水里看不到，排查「这单到底花没花钱」只能翻归档对 rid。
+// 归档事件与流水行共用同一个 trace.id，两处必须能对上。
+func TestChatLogRowCarriesRequestID(t *testing.T) {
+	withChatLog(t)
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
+	reqLog := reqlog.New(reqlog.Config{})
+	h := NewHandler(Config{
+		Pool:       testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:   up,
+		RequestLog: reqLog,
+	})
+	var rec *httptest.ResponseRecorder
+	out := captureStdout(t, func() {
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[]}`)))
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	rid := rec.Header().Get("X-Request-Id")
+	if !strings.HasPrefix(rid, "req-") {
+		t.Fatalf("X-Request-Id=%q", rid)
+	}
+	if !strings.Contains(out, "rid="+rid) {
+		t.Fatalf("流水行必须带 rid=%s（否则 credit/out/try 整段丢失），实际输出:\n%s", rid, out)
+	}
+	if !strings.Contains(out, "credit=") {
+		t.Fatalf("流水行必须带 credit= 段，实际输出:\n%s", out)
+	}
+}
