@@ -1221,9 +1221,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if strings.TrimSpace(msg) == "" {
 					msg = "upstream capacity is full (queue.full); retry after a short wait"
 				}
-				writeOpenAIErrorHint(w, http.StatusServiceUnavailable, "upstream_busy", msg,
+				// 6020 带 data.retry_after（实测 40s）时，上游给的是通道级排队口径：
+				// 队列按 client_user_type 全局共享，换号/立刻重试都撞同一堵墙。回
+				// 429 + Retry-After 让客户端按上游给的时长睡；没有该字段（6021 队列满）
+				// 才是「间歇空窗」，保持 503 让客户端自行短退避。
+				busyStatus := queueBusyStatus(w, string(respBody))
+				writeOpenAIErrorHint(w, busyStatus, "upstream_busy", msg,
 					h.hintOf(upstream.ErrUpstreamBusy, string(respBody), bareModel, reqHasImage, uerr))
-				st.status = http.StatusServiceUnavailable
+				st.status = busyStatus
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
@@ -1559,10 +1564,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			msg = "upstream gateway error (Cloudflare 5xx): origin unreachable, retry after a short wait"
 			w.Header().Set("Retry-After", "30")
 		case upstream.ErrUpstreamBusy:
-			// 6021 queue.full 渠道级容量满载（防御路径：正常已在轮转循环内
-			// fail-fast 拦截）。503 + 可重试语义——上游原文（下方统一透传）
-			// 含 requestId，客户端按 SDK 退避重试即可。
+			// 6020/6021 渠道级排队/容量满载（防御路径：正常已在轮转循环内
+			// fail-fast 拦截）。6020 带 data.retry_after 时按上游给的时长回
+			// 429 + Retry-After；6021 无该字段保持 503。上游原文（下方统一
+			// 透传）含 requestId，客户端可直接对账。
 			code = "upstream_busy"
+			status = queueBusyStatus(w, ue.Msg)
 			msg = "upstream capacity is full (queue.full); retry after a short wait"
 		case upstream.ErrModelBusy:
 			// 14003 模型后端间歇繁忙：503 + 可重试语义，并带 Retry-After。
@@ -1959,6 +1966,25 @@ const wafCooldownBase = 60 * time.Second
 // writeOpenAIErrorHint 同 writeOpenAIError，另在 error 对象上附加
 // error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。
 // message 仍是上游原文透传（hint 只做并列补充，绝不替换/包装 message）。
+// queueBusyStatus 渠道级排队（6020/6021）的对外状态码。
+//
+// 6020 的 body 会带 data.retry_after（实测 40s）——那是「整条通道多久后重试」的
+// 口径，队列按 client_user_type 全局共享，换号与立刻重试都只是把同一份请求多发
+// 几次。此时回 429 + Retry-After，让客户端按上游给的时长睡；6021（队列满、无该
+// 字段）保持 503，属于间歇空窗、客户端短退避有机会穿透。
+func queueBusyStatus(w http.ResponseWriter, body string) int {
+	d, ok := upstream.QueueRetryAfter([]byte(body))
+	if !ok {
+		return http.StatusServiceUnavailable
+	}
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	return http.StatusTooManyRequests
+}
+
 func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint string) {
 	if hint == "" {
 		writeOpenAIError(w, status, code, msg)

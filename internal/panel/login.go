@@ -11,11 +11,13 @@ package panel
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,8 +61,39 @@ func loginEndpoints(realm string) (state, token, account, origin string) {
 	return loginEndpointsFor(loginsite.ForRealm(realm))
 }
 
-// loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
-var loginHTTP = &http.Client{Timeout: 30 * time.Second}
+// loginHTTP 设备授权专用 client：无 cookie（每请求携带 state，无会话态）。
+//
+// ⚠️ 不能直接用默认 transport（与 internal/upstream 的 newTransport 同源处置）：
+// 默认 transport 会经 ALPN 协商出 HTTP/2，而容器 DNS（127.0.0.11）偶发
+// "server misbehaving" 并留下半死连接——半死 h2 流被复用时一直等响应头，直到
+// 客户端**总超时**才报错（auth state: context deadline exceeded）。用户可见表现：
+// 国内版一直拿不到授权链接；登录轮询走的 auth/token 是同一个 client，同样会卡，
+// 浏览器侧明明已登录成功、面板却检测不到。
+//
+// 两层防护：
+//   - TLS 层：空 TLSNextProto 真正禁 h2（必须 make 而非 nil；只设
+//     ForceAttemptHTTP2=false 无效，ALPN 仍会协商出 h2）；
+//   - 连接层：建连 8s / TLS 握手 8s / 响应头 15s，让单次尝试在 ~15s 内失败
+//     而不是拖满 30s 总超时，配合 doJSON 的「一个响应都没拿到」重试。
+var loginHTTP = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   8 * time.Second,
+			KeepAlive: 15 * time.Second,
+		}).DialContext,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       60 * time.Second,
+	},
+}
+
+// loginAttempts 设备授权链路的单次逻辑请求最多尝试几次：只对「一个响应都没拿到」
+// 的传输层失败重试（已拿到响应的业务错误立即返回，避免拖慢 3s 一轮的轮询）。
+const loginAttempts = 2
 
 func commonHeaders(req *http.Request, origin string) {
 	req.Header.Set("Content-Type", "application/json")
@@ -108,8 +141,38 @@ func (e *loginEnvelopeError) Error() string {
 }
 
 // doJSON 发一次 JSON 请求并解信封。origin 为 Origin/Referer 基础域（随站点切）。
+//
+// body 先整体读入内存再重放：登录链路的 body 都很小（"{}" / refreshToken），
+// 读一次换来「传输层失败可重试」；已拿到响应（status != 0）一律不重试。
 func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, int, error) {
-	req, err := http.NewRequest(method, fullURL, body)
+	var payload []byte
+	if body != nil {
+		payload, _ = io.ReadAll(io.LimitReader(body, 1<<20))
+	}
+	var lastErr error
+	for attempt := 0; attempt < loginAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 400 * time.Millisecond)
+		}
+		data, status, err := doJSONOnce(method, fullURL, bearer, payload, origin)
+		if err == nil {
+			return data, status, nil
+		}
+		if status != 0 {
+			return nil, status, err // 上游已应答：确定结果，不重试
+		}
+		lastErr = err
+	}
+	return nil, 0, lastErr
+}
+
+// doJSONOnce 单次尝试（不做重试）。
+func doJSONOnce(method, fullURL, bearer string, payload []byte, origin string) (json.RawMessage, int, error) {
+	var rdr io.Reader
+	if payload != nil {
+		rdr = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequest(method, fullURL, rdr)
 	if err != nil {
 		return nil, 0, err
 	}
