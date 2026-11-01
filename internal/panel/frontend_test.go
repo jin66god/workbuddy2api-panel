@@ -1686,3 +1686,46 @@ vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig; t
 		t.Fatalf("advanced config=%s want %s", strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestAccountRowRealmTagNotShrunk 账号名过长时「国际版」标识不能被挤掉。
+//
+// 账号池行是 `display:flex` 的 .nm：名字与若干 .realm-tag 是同一行的 flex item，
+// 默认 flex-shrink:1。账号名很长时两个 item 一起被压缩，标签先被压成 0 宽度并
+// 被父容器 overflow 裁掉——用户看到的就是「国际版标签消失」。
+// 修法两条缺一不可：标签 flex:none 不参与收缩；名字包进 .mid（唯一可收缩项，
+// 超出省略）。只加其中一条，要么标签仍被压、要么名字撑破单元格。
+func TestAccountRowRealmTagNotShrunk(t *testing.T) {
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^\.realm-tag \{[^}]*\}`).FindString(string(html))
+	if m == "" {
+		t.Fatal("找不到 .realm-tag 的样式规则")
+	}
+	if !strings.Contains(m, "flex: none") {
+		t.Errorf(".realm-tag 必须 flex:none（否则账号名过长时标签被压缩成 0 宽）: %s", m)
+	}
+	if !strings.Contains(m, "white-space: nowrap") {
+		t.Errorf(".realm-tag 必须 white-space:nowrap: %s", m)
+	}
+
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	src := string(js)
+	// 账号行模板：名字必须是 .mid（可收缩 + 省略），标签必须在 .mid 之外。
+	const rowStart = `'<td class="who"><div class="nm"><span class="mid">' + remarkName(s.uid`
+	i := strings.Index(src, rowStart)
+	if i < 0 {
+		t.Fatal("账号行模板里名字没有被 .mid 包裹（账号名过长时无法收缩，标签会被挤出去）")
+	}
+	midClose := strings.Index(src[i:], `+ '</span>' + (s.realm === 'global'`)
+	if midClose < 0 {
+		t.Fatal("账号行的 realm-tag 不在 .mid 之后（标签被包进可收缩的名字里会一起被裁掉）")
+	}
+	if tag := strings.Index(src[i:i+midClose], `realm-tag">国际版`); tag >= 0 {
+		t.Error("国际版标签被写进了可收缩的名字区间")
+	}
+}
