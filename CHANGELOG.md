@@ -3,6 +3,38 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.24.0（2026-11-01）
+
+### 修复
+
+- **出站 TLS 指纹对齐官方 Node 形态**：ClientHello 去掉 ALPN 与 padding（扩展 12 → 10），
+  与官方 chat / report / billing / refresh 真机逐字节同形（JA3 `71dc8c…`、JA4
+  `t13d0a1200_5d04281c6031_b76c5ee2507d`）。旧实现是可被 JA4 一次筛出的第三族。
+  `WB2_TLS_FINGERPRINT=0` 可回滚到标准库形态。
+- **`/v2/report` 改回官方 Node 形态**：不再发 `Origin` / `Referer` / `x-client-platform`
+  与浏览器 UA（旧值是 Chrome/152，不可能的存在）；改发 `X-Domain` / `X-Product` 与
+  32 位 hex 请求 ID。行为任务若出现异常，`WB2_REPORT_LEGACY=1` 可回滚旧浏览器形态。
+- **短 RPC 补四段 `Accept-Encoding`**（`gzip, compress, deflate, br`）并按响应头解压，
+  解压发生在错误分类之前——否则压缩体被当文本会让限流/账号故障判据全部失效。
+- **补 `Connection` 头**：chat / report / chat-busy 写 `keep-alive`，`/v3/config` 写 `close`。
+- **出站头名逐名对齐官方拼写**（46 项）：修正 Go canonical 化造成的
+  `Acp-Connection-Id`、`X-B3-Parentspanid` 等痕迹；六个特判头保持 canonical。
+- **chat 流水行补 `rid` / `out` / `try` / `credit`**：此前 request_id 从未赋值，整段丢失，
+  上游末帧 `usage.credit`（真实扣费）在流水里看不到。
+- **登录 client 禁 h2 并加传输层重试**：半死 h2 流被复用时不再卡满 30s 超时
+  （拿不到授权链接 / 登录已完成但检测不到）；只对「一个响应都没拿到」的失败重试。
+- **6020 带 `retry_after` 时回 429 + `Retry-After`**：按上游给的通道级时长让客户端等待，
+  不再用本地短退避反复撞队列。
+
+### 新增
+
+- **配置页分域编辑四项 base**：国内版 / 国际版的 chat 与 billing base 都能在面板改，
+  不再需要停机改 `config.json`；`cn.billing_base` 同时补上了后端装配（此前填了不生效）。
+
+### 面板修复
+
+- **账号名过长时「国际版」标识不再消失**：标签不再参与 flex 收缩，名字超出走省略号。
+
 ## v1.23.0（2026-10-31）
 
 ### 新增

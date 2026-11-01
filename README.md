@@ -108,7 +108,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 
 ### 实现原理（简述）
 
-任务计分走 `/v2/report` 行为上报，但**不同任务认不同客户端指纹**：CLI 指纹（`www.codebuddy.cn`）、桌面指纹（`copilot.tencent.com` + `WorkBuddy/5.5.6` UA + `workbuddy-desktop` 事件族）、web 指纹（`www.workbuddy.cn` + `x-client-platform: web`）。网关为每类任务构造对应指纹的判据事件链（`internal/upstream/desktop.go`）；专家类任务额外要求真实专家 id 与真实对话回执（`internal/upstream/streak.go` 之外的 expert 序列）。上报 200 ≠ 计分——面板在执行后轮询任务进度，达标即自动调用 Web 域领奖接口。
+任务计分走 `/v2/report` 行为上报，但**不同任务认不同客户端指纹**：CLI 指纹（`www.codebuddy.cn`）、桌面指纹（`copilot.tencent.com` + 桌面 UA + `workbuddy-desktop` 事件族）、web 指纹（`www.workbuddy.cn` + **纯 Node 形态 11 头**：不带 `Origin` / `Referer` / `x-client-platform` / `sec-ch-*`；回滚用 `WB2_REPORT_LEGACY=1`）。网关为每类任务构造对应指纹的判据事件链（`internal/upstream/desktop.go`）；专家类任务额外要求真实专家 id 与真实对话回执（`internal/upstream/streak.go` 之外的 expert 序列）。上报 200 ≠ 计分——面板在执行后轮询任务进度，达标即自动调用 Web 域领奖接口。
 
 > ⚠️ 行为事件按天幂等：重复点「一键完成」不会重复扣资源，已达标的任务自动跳过。
 
@@ -192,7 +192,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 14003 model busy | 模型后端间歇繁忙：只停「账号 × 该模型」10s（不写账号级冷却），全池被挡且剩余 ≤10s 时请求内等一次再重试；超时 `503 model_busy` + `Retry-After` |
 | 11-128 / 11140 分流 | 11-128 通道校验失败是请求级错误：不罚号、不冷却、不轮转，原样透传 400；11140 账号限制连续 3 次才禁用并提示在 WorkBuddy 申诉 |
 | refresh 单飞 | 同账号并发 refresh 复用首个结果，避免 RT 反重放撞 `12153` 掉登录 |
-| 出站网络 | `dns_servers` 指定解析器；`HTTP(S)_PROXY` 环境变量自动生效；`cn.chat_base` 支持海外出口改用 `www.workbuddy.cn` |
+| 出站网络 | `dns_servers` 指定解析器；`HTTP(S)_PROXY` 环境变量自动生效；四个分域 base 键（`cn/global` 的 `chat_base` / `billing_base`）可在面板直接改，海外出口可把 `cn.chat_base` 换成 `www.workbuddy.cn`；TLS ClientHello 默认复刻官方 Node 形态，`WB2_TLS_FINGERPRINT=0` 回滚标准库 |
 | 错误处置 | 12153 连续计数才禁用、404 短冷却、402 硬冷却至次日 04:00、连败降权、积分保底 |
 
 ### 任务与积分
@@ -455,6 +455,10 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 按账号身份自动：CN `WorkBuddy/5.8.3` · global `workbuddy-ai/5.8.4`，CLI 段 `2.161.0`）。官网「使用端」列按出站 UA 服务端归因 |
+| `cn.chat_base` | `https://www.workbuddy.cn` | 国内版对话 / 模型目录 base 覆盖（空 = 内置默认；需重启） |
+| `cn.billing_base` | `https://www.codebuddy.cn` | 国内版积分 / 成长任务 base 覆盖（空 = 内置默认；需重启） |
+| `global.chat_base` | 空 | 国际版对话 / 模型目录 base 覆盖（空 = 按账号 domain 选官方主机；需重启） |
+| `global.billing_base` | 空 | 国际版积分 / 成长任务 base 覆盖（空 = 同 chat base 口径；需重启） |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
 | `prompt.mode` | `passthrough` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
