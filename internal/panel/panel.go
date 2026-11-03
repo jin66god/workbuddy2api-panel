@@ -704,10 +704,12 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	checkinMsg := ""
 	checkinDone := false
-	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
-	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
-	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
-	if a.IsEnterprise() {
+	// 无个人成长体系的账号不发起该调用，端点退化为「刷新额度」——企业额度（以及
+	// 静态 Key 的企业口径额度）走 get-enterprise-user-usage 口径（见 upstream）。
+	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能
+	// 调用）。判据与登录 / 导入 / 自动排程统一用 SupportsPersonalEndpoints，避免
+	// 新增账号形态时只改一处造成漂移。
+	if !a.SupportsPersonalEndpoints() {
 		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
 	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额

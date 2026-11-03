@@ -3,6 +3,20 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## 未发布
+
+### 修复
+
+- **导入企业版账号保留企业标识**：cockpit 导入新增 `enterprise_id` / `enterpriseId` 两种
+  写法的读取并落盘。此前企业标识被丢掉，账号以个人号形态进入池子——导入即白签一次
+  （上游 400 code 10001）、额度误走个人 `get-user-resource`（企业号返回空 Accounts，
+  面板额度归零）、成长任务入队后被上游 403。
+- **签到门控统一为 `SupportsPersonalEndpoints`**：登录、导入、单号签到三处不再只判
+  `IsEnterprise`，静态 API Key（`ck_`/`pt_`）也不会再发起注定失败的 `daily-checkin`；
+  企业版与个人号行为不变。
+- **成长任务内部执行补兜底门控**：`runAutoAll` 与队列执行前复核账号形态。队列排队期间
+  重新授权成企业版/静态 Key 的账号不再空跑（行为事件上游 403，且消耗真实对话配额）。
+
 ## v1.24.0（2026-11-01）
 
 ### 修复

@@ -15,23 +15,30 @@ import (
 
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。
 type cockpitAccount struct {
-	ID            string `json:"id"`
-	Email         string `json:"email"`
-	UID           string `json:"uid"`
-	Nickname      string `json:"nickname"`
-	AccessToken   string `json:"access_token"`
-	RefreshToken  string `json:"refresh_token"`
-	TokenType     string `json:"token_type"`
-	ExpiresAt     int64  `json:"expires_at"`
-	Domain        string `json:"domain"`
-	DosageNotify  string `json:"dosage_notify_code"`
-	PaymentType   string `json:"payment_type"`
-	Status        string `json:"status"`
-	UsageUpdatedAt int64 `json:"usage_updated_at"`
-	LastCheckin   int64  `json:"last_checkin_time"`
-	CheckinStreak int    `json:"checkin_streak"`
-	CreatedAt     int64  `json:"created_at"`
-	LastUsed      int64  `json:"last_used"`
+	ID             string `json:"id"`
+	Email          string `json:"email"`
+	UID            string `json:"uid"`
+	Nickname       string `json:"nickname"`
+	AccessToken    string `json:"access_token"`
+	RefreshToken   string `json:"refresh_token"`
+	TokenType      string `json:"token_type"`
+	ExpiresAt      int64  `json:"expires_at"`
+	Domain         string `json:"domain"`
+	DosageNotify   string `json:"dosage_notify_code"`
+	PaymentType    string `json:"payment_type"`
+	Status         string `json:"status"`
+	UsageUpdatedAt int64  `json:"usage_updated_at"`
+	LastCheckin    int64  `json:"last_checkin_time"`
+	CheckinStreak  int    `json:"checkin_streak"`
+	CreatedAt      int64  `json:"created_at"`
+	LastUsed       int64  `json:"last_used"`
+
+	// EnterpriseID 兼容导出工具的两种写法：cockpit 导出多为 snake_case，auth 文件与
+	// 登录接口用 camelCase。任一带值都视为企业版——丢掉它会让企业号以个人号形态
+	// 落盘：导入后白签一次（上游 400 code 10001）、额度误走个人口径（企业号
+	// get-user-resource 返回空 Accounts）、成长任务入队后被 403。见 auth.IsEnterprise。
+	EnterpriseID      string `json:"enterprise_id"`
+	EnterpriseIDCamel string `json:"enterpriseId"`
 }
 
 // importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。
@@ -104,12 +111,18 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			nickname = acc.Email
 		}
 
+		enterpriseID := strings.TrimSpace(acc.EnterpriseID)
+		if enterpriseID == "" {
+			enterpriseID = strings.TrimSpace(acc.EnterpriseIDCamel)
+		}
+
 		a := &auth.Auth{
 			AccessToken:  at,
 			RefreshToken: rt,
 			ExpiresAt:    expiresAt,
 			Domain:       acc.Domain,
 			UID:          uid,
+			EnterpriseID: enterpriseID,
 			Nickname:     nickname,
 			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
 		}
@@ -146,7 +159,13 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 				log.Printf("panel: import global trial uid=%s 已领", uid)
 			}
 		} else {
-			if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 企业版 / 静态 API Key 无个人成长体系：CN 签到端点对企业号直接 400
+			// code 10001「企业账号不支持该操作」，静态 Key 没有个人账号身份。
+			// 跳过签到（不制造注定失败的请求与误报），但下方余额查询照常——两种
+			// 形态的额度都走企业口径（get-enterprise-user-usage）。
+			if !a.SupportsPersonalEndpoints() {
+				log.Printf("panel: import 跳过签到 uid=%s（企业版/API Key 无个人成长体系）", uid)
+			} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 				log.Printf("panel: import checkin uid=%s: %v", uid, err)
 			}
 		}

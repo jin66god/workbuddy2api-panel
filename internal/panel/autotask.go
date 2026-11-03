@@ -1287,6 +1287,15 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // 流程：先把所有未接受的任务批量 accept（规范状态机；上游脚本建议"先 accept"），
 // 再逐项执行行为链路。accept 不是进度产生的必要条件，但让后续状态流转规范。
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
+	// 兜底门控：企业版 / 静态 API Key 无个人成长体系（行为事件上游直接 403）。
+	// HTTP 入口已拒绝，但队列与未来新增的内部调用也必须零上游请求——这里再挡一次，
+	// 避免拿着真实对话配额空跑。
+	if a == nil || !a.SupportsPersonalGrowth() {
+		return []map[string]any{{
+			"task_code": "(全部)", "status": "skipped",
+			"message": "该账号为企业版或静态 API Key，无个人成长体系，成长任务无法执行",
+		}}
+	}
 	var out []map[string]any
 
 	// have 本账号任务 code 全集：mp 口径是默认口径的超集（见 upstream.ListTasksMP），

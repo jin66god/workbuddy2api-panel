@@ -324,6 +324,14 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			// 入队时已门控，但队列可能等很久、账号在此期间重新授权成企业版 / 静态
+			// Key：执行前复核一次，别对已失去成长体系的账号空跑（行为事件上游 403）。
+			if !one.a.SupportsPersonalGrowth() {
+				p.queueSet(q, one.a.UID, func(it *queueItem) {
+					it.Status, it.Message = "skipped", "账号无个人成长体系（企业版/API Key），跳过"
+				})
+				return
+			}
 			// per-account 互斥：与单任务/一键完成共用一把锁。
 			if !p.tryLockAccount(one.a.UID) {
 				p.queueSet(q, one.a.UID, func(it *queueItem) {
