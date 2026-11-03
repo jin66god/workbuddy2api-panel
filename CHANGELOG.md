@@ -3,7 +3,7 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
-## 未发布
+## v1.24.1（2026-11-03）
 
 ### 修复
 
