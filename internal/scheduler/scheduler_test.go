@@ -607,10 +607,16 @@ func TestSetIncludeDisabledInTasksHot(t *testing.T) {
 		t.Fatalf("前置：缺省应只签 1 个，got %d", got)
 	}
 
+	before := f.checkinCalls.Load()
 	s.SetIncludeDisabledInTasks(true)
 	s.RunCheckinNow()
-	if got := f.checkinCalls.Load(); got != 3 {
-		t.Errorf("热更新后 checkin calls=%d want 3（1 + u1 + u2）", got)
+	// u1 在上一轮已签到、本地 lastCheckinDay 已置位，本轮跳过（不再盲发注定 400
+	// 的请求）；热更新只应新纳入禁用号 u2，故增量恰好 1。
+	if got := f.checkinCalls.Load() - before; got != 1 {
+		t.Errorf("热更新后新增 checkin calls=%d want 1（仅新纳入的 u2；u1 本地已签跳过）", got)
+	}
+	if st, _ := p.Status("u1"); !st.CheckinDone {
+		t.Errorf("u1 本地应记录今日已签到")
 	}
 }
 
@@ -677,7 +683,6 @@ func TestPausedVsDisabledTaskParticipation(t *testing.T) {
 		t.Errorf("checkin calls=%d want 2（正常 + 暂停参与；禁用跳过）", got)
 	}
 }
-
 
 // TestPausedStillTravels 暂停号照常跑旅行：旅行是纯 RPC（状态/派出/领奖 +
 // 领养前置上报），不发模型对话，与「让位防风控」不冲突——唯一被跳过的

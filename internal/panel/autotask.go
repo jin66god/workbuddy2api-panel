@@ -289,10 +289,18 @@ func (p *Panel) noteSoftRate(uid string, d time.Duration) {
 }
 
 // listTasksSoftRate 拉任务列表，软限流时按窗口等待重试（mp 走小程序口径）。
-// 冷却窗口内不重试直接快失败：此时上游还没放开，再打只会把窗口续得更长。
+// 撞过 429 会记一个短冷却：同一窗口内的后续调用先等到窗口结束再发，避免每次
+// 白撞一次 429（一轮全量要连打几十次列表，逐个探测会把频控窗口续得更长）。
 func (p *Panel) listTasksSoftRate(a *auth.Auth, mp bool) ([]upstream.Task, error) {
 	if d := p.softRateGate(a.UID); d > 0 {
-		return nil, fmt.Errorf("上游限流（429），约 %s 后恢复，请稍后重跑该任务", d.Round(time.Second))
+		// 同一限流窗口内不再先打一次注定 429 的请求：等窗口结束再发。
+		// 调用方原路径也是撞 429 后等这么久，提前等只是省掉一次无效请求，
+		// 总耗时不变；封顶 softRateGapMax 防止异常 Retry-After 拖住入口。
+		if d > softRateGapMax {
+			d = softRateGapMax
+		}
+		log.Printf("autotask %s: 软限流冷却中，等 %s 后再请求", logfmt.Label(a.UID, a.Nickname), d.Round(time.Second))
+		time.Sleep(d)
 	}
 	for attempt := 0; ; attempt++ {
 		var tasks []upstream.Task
@@ -314,6 +322,9 @@ func (p *Panel) listTasksSoftRate(a *auth.Auth, mp bool) ([]upstream.Task, error
 				softRateRetries, softRateGapMax.Round(time.Second), err)
 		}
 		d := softRateWait(err, attempt+1)
+		// 记录短冷却供后续调用复用：同窗口内下一次 ListTasks 会先等到窗口结束，
+		// 不再先打一次注定 429 的请求。
+		p.noteSoftRate(a.UID, d)
 		log.Printf("autotask %s: 上游软限流，等 %s 后重试（第 %d/%d 次）",
 			logfmt.Label(a.UID, a.Nickname), d.Round(time.Second), attempt+1, softRateRetries)
 		time.Sleep(d)

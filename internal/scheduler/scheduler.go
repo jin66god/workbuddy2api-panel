@@ -597,7 +597,12 @@ func (s *Scheduler) runCheckin(spread bool) {
 		// token_source=enterprise_switch 不再是门控判据（issue #4）：签到与成长任务
 		// 对该形态实测正常，企业形态一律以 enterpriseId 为准。
 		if a.SupportsPersonalEndpoints() {
-			if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 本地已记录今天签到（登录 / 手动 / 上一轮排程）→ 不再盲发一次注定 400
+			// 的请求。lastCheckinDay 只在收到上游成功或「今天已签到」幂等响应后置位，
+			// 跨自然日自动失效，不会漏签。
+			if st.CheckinDone {
+				log.Printf("checkin %s: 今日已签到（本地记录），跳过", logfmt.Label(st.UID, st.Nickname))
+			} else if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
 				if upstream.IsAlreadyCheckin(err) {
 					s.cfg.Pool.NoteCheckinDone(st.UID)

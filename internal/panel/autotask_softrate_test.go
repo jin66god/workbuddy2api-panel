@@ -53,7 +53,8 @@ func TestListTasksRetriesSoftRateThenSucceeds(t *testing.T) {
 
 // TestListTasksSoftRateGivesUpAndFastFails 重试用尽后：
 //   - 错误文案带「已重试 N 次」与剩余时间；
-//   - 窗口内再查直接快失败，不再打上游（否则每个动作各睡一遍，作业卡几十分钟）。
+//   - 窗口内再查先等到窗口结束再发（不再白撞一次 429），仍失败时同样给出重试文案，
+//     且不会跳过重试预算（账面上仍是整整一轮 3 次）。
 func TestListTasksSoftRateGivesUpAndFastFails(t *testing.T) {
 	fastSoftRate(t)
 	var calls int32
@@ -76,11 +77,11 @@ func TestListTasksSoftRateGivesUpAndFastFails(t *testing.T) {
 	if before != 3 {
 		t.Fatalf("calls=%d want 3（首次 + 2 次重试）", before)
 	}
-	if _, err2 := p.taskByCode(a, "chat_5"); err2 == nil || !strings.Contains(err2.Error(), "后恢复") {
-		t.Fatalf("窗口内应快失败并给剩余时间: %v", err2)
+	if _, err2 := p.taskByCode(a, "chat_5"); err2 == nil || !strings.Contains(err2.Error(), "已重试 2 次") {
+		t.Fatalf("窗口内重查应等到窗口结束再走完重试预算: %v", err2)
 	}
-	if got := atomic.LoadInt32(&calls); got != before {
-		t.Fatalf("窗口内又打了上游: calls=%d want %d", got, before)
+	if got := atomic.LoadInt32(&calls); got != before+3 {
+		t.Fatalf("窗口内重查 calls=%d want %d（等窗口后完整一轮，不跳过重试预算）", got, before+3)
 	}
 }
 
