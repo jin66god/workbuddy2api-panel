@@ -98,6 +98,9 @@ func PrepareBodyOptWithRounds(src []byte, sanitize bool, efforts map[string][]st
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
 		}
+		// tools 是客户端自带的能力声明，描述由客户端作者撰写，同样会带身份句
+		// （上游 issue #395：只洗 messages 时整段工具描述原样出站）。
+		sanitizeTools(obj["tools"])
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {

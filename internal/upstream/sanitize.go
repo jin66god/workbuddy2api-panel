@@ -254,6 +254,40 @@ func sanitizeToolCalls(v any) bool {
 	return changed
 }
 
+// sanitizeTools 净化 tools[].function.description。
+//
+// 工具描述由客户端作者撰写（Claude Code / Codex 这类会把身份句写进 description），
+// 只洗 messages 时它整段原样出站（上游 issue #395 同类）。shortcut: 只洗 OpenAI 形状的
+// function.description，Anthropic 形状的顶层 description 与 parameters 里的 schema 描述不洗。
+//
+// 用 sanitizeTextIdentity 而不是 sanitizeText：工具描述与 system prompt 同源、都是客户端
+// 作者写的固定模板句，属上游「系统提示词类」校验范围；而 user/assistant/tool 里的同名文本
+// 是用户数据，走普通 sanitizeText。两者的分层与本库 sanitizeMessages 的 role 判据一致。
+func sanitizeTools(v any) bool {
+	tools, ok := v.([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, t := range tools {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := tm["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if d, ok := fn["description"].(string); ok {
+			if s := sanitizeTextIdentity(d); s != d {
+				fn["description"] = s
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
 // sanitizeMessages 净化 messages 中的 content 与 tool_calls；任一命中返回 true。
 func sanitizeMessages(messages []any) bool {
 	changed := false
