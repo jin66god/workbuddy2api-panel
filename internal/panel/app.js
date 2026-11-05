@@ -532,7 +532,12 @@ function renderModelLocks(rows) {
   }
 }
 
-async function loadOverview(quiet) {
+/* 首页轮询指纹：每 5 秒无条件重建账号表会打断行内焦点与悬停（几十个号时尤其明显）。
+   账号+模型锁的 JSON 没变就跳过重建；统计卡、到期提醒、运行时长照常每轮刷新。
+   force=true 用于「数据没变但必须重绘」的场景（保存本机备注后要显示新备注）。 */
+let overviewSig = '';
+
+async function loadOverview(quiet, force) {
   try {
     const d = await api('overview');
     overviewData = d;
@@ -555,8 +560,14 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    renderAccounts(d.accounts || []);
-    renderModelLocks(d.model_locks);
+    // 账号表与模型锁只在载荷变化时重建：同载荷重复轮询不打断行内焦点/悬停。
+    const accList = d.accounts || [];
+    const sig = JSON.stringify([accList, d.model_locks || []]);
+    if (force || sig !== overviewSig) {
+      overviewSig = sig;
+      renderAccounts(accList);
+      renderModelLocks(d.model_locks);
+    }
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
     // 「检查」之后卡片永远停在那一刻的旧数据。
@@ -3647,8 +3658,9 @@ function saveRemarkForm() {
   });
   const saved = storeRemarks(map);
   closeRemarks();
-  // 备注只影响本机展示：重渲染当前视图即可，无需后端参与。
-  if (view === 'accounts') loadOverview(true);
+  // 备注只影响本机展示：强制重绘账号表即可（overview 载荷没变，指纹跳过会漏掉新备注），
+  // 无需后端参与。
+  if (view === 'accounts') loadOverview(true, true);
   else if (view === 'usage' && usageData) renderUsage(usageData);
   toast(saved ? '备注已保存（仅本机浏览器）' : '备注未能写入浏览器存储（隐私模式或空间已满），刷新后会丢失', saved ? '' : 'err');
 }
