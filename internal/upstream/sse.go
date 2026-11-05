@@ -725,8 +725,16 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
-			// 注释/其他行：原样透传
+			// 注释/其他行：原样透传，并**补回帧分隔空行**。
+			//
+			// 本函数吞掉上游的分隔空行、自产 "\n\n" 只覆盖 data 帧；注释行只写单行的话，
+			// 会与下一个 "data: " 帧粘成 ": heartbeat\ndata: ..."。上游（及部分客户端）
+			// 按 "\n\n" 切帧时，整块没有 "data: " 前缀会被直接丢弃——GLM 的工具调用首帧
+			// 携带 id+name，被吞后整个调用消失、completed 的 output 变 null。
 			if _, werr := io.WriteString(w, line); werr != nil {
+				return werr
+			}
+			if _, werr := io.WriteString(w, "\n"); werr != nil {
 				return werr
 			}
 			if fl != nil {
