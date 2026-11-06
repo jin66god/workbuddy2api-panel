@@ -20,6 +20,16 @@
   长 SSE 在重启 / 更新镜像时被掐成连接重置，且日志里没有「关停放弃在途请求」的 WARN。
   README 新增「优雅关停与容器宽限期」一节说明两者的层级关系与调法。
 
+### CI
+
+- **新增 `stuck-run-watchdog`**：每 3 小时扫描状态停在 `in_progress` / `queued` 且超过
+  2 小时的运行，能取消的直接 `gh run cancel`，取消不掉的汇总成一个 `ci-stuck` issue
+  （已有开启中的 issue 则追加评论）。起因是一次矩阵腿未被创建导致 `publish` 被 skip、
+  运行永远不收敛，挂了 11 小时才被偶然发现——这类死锁所有补救接口都会互相矛盾地失败
+  （cancel 说已完成 / force-cancel 说不在运行 / rerun 说正在运行 / delete 403），
+  只能靠监控暴露出来再找 GitHub Support。支持 `workflow_dispatch` 手动触发，
+  可传 `max_age_hours` 与 `dry_run`。
+
 ## v1.24.2（2026-11-06）
 
 ### 修复
