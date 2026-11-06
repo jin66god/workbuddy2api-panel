@@ -9,10 +9,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 )
 
 // cstZone 与 scheduler 同口径（UTC+8），日志按 CST 切天。
-var cstZone = time.FixedZone("CST", 8*3600)
+var cstZone = cst.Zone()
 
 // LogStore 运行日志的按天 JSONL 落盘（重启后回填环形缓冲，支持导出）。
 //

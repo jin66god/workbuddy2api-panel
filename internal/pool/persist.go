@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"log"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/safefile"
 )
 
 var flushInterval = 5 * time.Second
@@ -118,9 +118,14 @@ func (p *Pool) Flush() {
 
 // Add 加入账号；已存在则保留原状态、更新凭证（upsert 单账号，不影响其他账号）。
 func (p *Pool) load() {
-	raw, err := os.ReadFile(p.stateFp)
+	// 主文件可能被掉电写成「长度正确、内容全 0」——json.Valid 判死后退回 .bak，
+	// 而不是当成空池把 11 个账号的状态全部丢掉。
+	raw, usedBackup, err := safefile.ReadWithBackup(p.stateFp, json.Valid)
 	if err != nil {
 		return
+	}
+	if usedBackup {
+		log.Printf("WARN: pool: state.json 已损坏，从 state.json.bak 恢复")
 	}
 	var sf stateFile
 	if json.Unmarshal(raw, &sf) != nil {
@@ -254,15 +259,9 @@ func (p *Pool) saveLocked() {
 		p.notePersistFail(err)
 		return
 	}
-	if dir := filepath.Dir(p.stateFp); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
-	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		p.notePersistFail(err)
-		return
-	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
+	// safefile：fsync 后再 rename，并把上一版留成 state.json.bak ——
+	// 掉电留下的全 0 文件会让账号池状态整体清空，那份 .bak 是唯一退路。
+	if err := safefile.Write(p.stateFp, raw, 0o600); err != nil {
 		p.notePersistFail(err)
 		return
 	}

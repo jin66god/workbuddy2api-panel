@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/safefile"
 )
 
 // hourlyKeep 小时桶的保留时长；超出后折叠为日桶。
@@ -338,14 +340,8 @@ func (r *Recorder) flush(force bool) {
 		r.markPersistFailed(err)
 		return
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		log.Printf("[usage] 写临时文件失败: %v", err)
-		r.markPersistFailed(err)
-		return
-	}
-	if err := os.Rename(tmp, r.path); err != nil {
-		log.Printf("[usage] 原子替换失败: %v", err)
+	if err := safefile.Write(r.path, raw, 0o600); err != nil {
+		log.Printf("[usage] 落盘失败: %v", err)
 		r.markPersistFailed(err)
 		return
 	}

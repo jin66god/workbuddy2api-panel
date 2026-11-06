@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
@@ -57,7 +58,7 @@ func (s *Scheduler) planSpread(kind taskKind, uids []string) *spreadPlan {
 		return nil
 	}
 	now := time.Now()
-	day := now.Format("2006-01-02")
+	day := cst.Day(now)
 	type pair struct {
 		uid string
 		off time.Duration

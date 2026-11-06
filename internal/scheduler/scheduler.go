@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -266,7 +267,9 @@ func poke(ch chan struct{}) {
 func nextFire(now time.Time, hours []int) time.Time {
 	var earliest time.Time
 	for _, h := range hours {
-		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
+		// 档位按北京时间判定：宿主跑在 UTC 时 now.Location() 会让 activity_hours=[10]
+		// 实际落在 CST 18:00。日界口径统一由 cst 包决定。
+		t := cst.At(now, h)
 		if !t.After(now) {
 			t = t.Add(24 * time.Hour)
 		}

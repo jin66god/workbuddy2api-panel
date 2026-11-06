@@ -22,6 +22,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 )
 
 const (
@@ -349,7 +351,7 @@ func (w *archiveWriter) writeEvent(e Event) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	day := now.Format("2006-01-02")
+	day := cst.Day(now)
 	if w.file == nil || w.day != day {
 		if err := w.openFile(now, false); err != nil {
 			w.setErr(err)
@@ -375,7 +377,7 @@ func (w *archiveWriter) writeEvent(e Event) {
 
 func (w *archiveWriter) openFile(now time.Time, rotate bool) error {
 	w.closeFile()
-	day := now.Format("2006-01-02")
+	day := cst.Day(now)
 	if err := os.MkdirAll(w.cfg.Dir, 0o700); err != nil {
 		return err
 	}

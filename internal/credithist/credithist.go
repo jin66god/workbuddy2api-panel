@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/safefile"
 )
 
 // maxDelta 单次变动的留痕上限（对齐参考实现的 _MAX_DELTA）：超过它基本可断定是
@@ -185,12 +187,7 @@ func (l *Ledger) write(raw []byte) {
 			return
 		}
 	}
-	tmp := l.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		log.Printf("[credithist] 写临时文件失败: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, l.path); err != nil {
-		log.Printf("[credithist] 原子替换失败: %v", err)
+	if err := safefile.Write(l.path, raw, 0o600); err != nil {
+		log.Printf("[credithist] 落盘失败: %v", err)
 	}
 }

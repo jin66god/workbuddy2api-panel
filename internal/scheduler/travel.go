@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
@@ -33,11 +34,10 @@ var adoptReportGap = 1050 * time.Millisecond
 
 // cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。中国无夏令时，固定 +8 即可，
 // 不依赖容器 tzdata。
-var cstZone = time.FixedZone("CST", 8*60*60)
-
 // travelDay 返回 t 所属的上游自然日（CST），格式 2006-01-02。
+// 保留薄封装：调用点带「旅行当日只判一次」的语义，时区口径见 cst 包。
 func travelDay(t time.Time) string {
-	return t.In(cstZone).Format("2006-01-02")
+	return cst.Day(t)
 }
 
 // RunTravelNow 立即对池内所有可用账号执行一趟旅行巡检。

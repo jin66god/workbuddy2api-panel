@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
 
@@ -58,7 +59,7 @@ func (p *Pool) NoteCheckinDone(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		day := time.Now().Format("2006-01-02")
+		day := cst.Day(time.Now())
 		if e.lastCheckinDay != day {
 			e.lastCheckinDay = day
 			p.dirty.Store(true)
@@ -143,7 +144,7 @@ func sanitizeExpiryBuckets(in []ExpiryBucket, now time.Time) []ExpiryBucket {
 	if len(in) == 0 {
 		return nil
 	}
-	today := now.Format("2006-01-02")
+	today := cst.Day(now)
 	out := make([]ExpiryBucket, 0, len(in))
 	for _, b := range in {
 		if b.Remain <= 0 || b.Date == "" || b.Date < today {
@@ -613,10 +614,11 @@ func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
 // 04:00 整及之后返回次日 04:00。
 // time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），天然覆盖跨日/跨月/跨年。
 func nextDay4AM(now time.Time) time.Time {
-	if now.Hour() < 4 {
-		return time.Date(now.Year(), now.Month(), now.Day(), 4, 0, 0, 0, now.Location())
+	t := cst.At(now, 4)
+	if !t.After(now) {
+		return t.Add(24 * time.Hour)
 	}
-	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
+	return t
 }
 
 // ReenableIfCredits 签到/余额刷新后解冻：仅当 remain > 0 且账号非禁用时，解冻

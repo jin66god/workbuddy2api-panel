@@ -242,8 +242,26 @@ func (p *Panel) routes() {
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
 // 与 401 错误响应全都带上（API 也可能在浏览器里被直接打开）。
+// panelPublicPaths 面板允许匿名访问的路径：只有页面骨架与静态资源。
+// 其余一律先鉴权——包括尚未注册的路径（未注册路径也返回 401，而不是 404，
+// 避免用状态码差异探测接口是否存在）。
+var panelPublicPaths = map[string]struct{}{
+	"/panel":            {},
+	"/panel/":           {},
+	"/panel/app.js":     {},
+	"/panel/mobile.css": {},
+	"/panel/mobile.js":  {},
+}
+
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	// 鉴权在这里默认拒绝，而不是逐条包在路由上：逐条包的话，新增一条路由忘了包
+	// 就静默公开（本仓库已有 40+ 条路由，靠人记不可靠）。withAuth 仍保留在各
+	// 路由上作二次校验：任一条路径失效都不会直接放行。
+	if _, ok := panelPublicPaths[r.URL.Path]; !ok && !httpauth.VerifyBearer(r, p.apiKey()) {
+		writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+		return
+	}
 	p.mux.ServeHTTP(w, r)
 }
 
