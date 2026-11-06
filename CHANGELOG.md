@@ -3,6 +3,23 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## 未发布
+
+### 修复
+
+- **`config.example.json` 的抖动默认值会把防指纹功能关掉**：代码 `Default()` 把
+  `schedule.balance_refresh_jitter_permill` / `task_sweep_jitter_permill` 缺省设为 `150`，
+  README 字段表也写 `150`，但示例文件里显式写了 `0`。`Load` 是「先取默认值再 unmarshal 覆盖」，
+  于是照示例复制配置的用户会**显式关闭**抖动，恢复成「精确每 5 分钟全账号齐射」的机器人形状。
+  示例值改为 `150`，与代码默认和文档对齐（想关的人仍可显式写 `0`）。
+
+### 部署
+
+- **`docker-compose.yml` 补 `stop_grace_period: 130s`**：Docker 默认宽限期只有 10s，
+  10 秒即 SIGKILL，`server.shutdown_timeout`（缺省 30s）的排干窗口从未真正生效，
+  长 SSE 在重启 / 更新镜像时被掐成连接重置，且日志里没有「关停放弃在途请求」的 WARN。
+  README 新增「优雅关停与容器宽限期」一节说明两者的层级关系与调法。
+
 ## v1.24.2（2026-11-06）
 
 ### 修复

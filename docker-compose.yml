@@ -10,6 +10,11 @@ services:
       context: .
     container_name: workbuddy2api
     restart: unless-stopped
+    # 优雅关停宽限期：Docker 默认只有 10s，10 秒后直接 SIGKILL，
+    # server.shutdown_timeout（缺省 30s）根本没机会走完排干 —— 长 SSE 会被掐成连接重置。
+    # 这里给 130s（上限，不是固定耗时：请求做完进程即退出，Docker 立即返回）。
+    # 自己调过 server.shutdown_timeout 时，保持在它之上 5~10s。
+    stop_grace_period: 130s
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
     # 「写入 auths/*.json.tmp 失败 permission denied」，三种解法任选：
     #   1) 非 root · 让容器以你自己的 uid 运行（挂载目录本来就是你建的）：

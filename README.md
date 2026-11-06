@@ -1000,6 +1000,16 @@ CI 用多阶段 Dockerfile（`golang:1.27.3-alpine` 构建 → `alpine:3.20` 运
 
 账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`。
 
+### 优雅关停与容器宽限期
+
+`server.shutdown_timeout`（缺省 `30s`）是**进程侧**的在途请求排干窗口：收到 SIGTERM 后停止接受新连接、等已在跑的请求做完，超时才打 `WARN: 优雅关停未在 … 内完成` 并放弃在途请求。它改动需重启进程。
+
+但它生效的前提是**容器运行时愿意等**。Docker / Compose 的 `stop_grace_period` 默认只有 **10s**：10 秒一到直接 SIGKILL，进程根本没机会走完排干——客户端看到连接重置，日志里连那条 WARN 都不会出现，排查时极易误判成网关或上游故障。
+
+因此 `docker-compose.yml` 显式设置 `stop_grace_period: 130s`，比缺省的 `shutdown_timeout` 高一个量级。这是**上限而不是固定耗时**：在途请求做完、进程退出，Docker 立即返回；只有进程卡死不响应 SIGTERM 时才真等到 130s 强杀。自己调过 `server.shutdown_timeout` 的话，宽限期保持在它之上 5~10s（留出打日志与 flush 落盘的时间）。
+
+`docker kill` 不走这套流程，直接 SIGKILL；改 `stop_grace_period` 需 `docker compose up -d` 重建容器才生效，`docker compose restart` 不会重读 compose 文件。
+
 ### 工具脚本
 
 | 脚本 | 用途 |

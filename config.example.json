@@ -50,8 +50,8 @@
     "blackcat_hours": [
       23
     ],
-    "balance_refresh_jitter_permill": 0,
-    "task_sweep_jitter_permill": 0,
+    "balance_refresh_jitter_permill": 150,
+    "task_sweep_jitter_permill": 150,
     "night_account_cap": 0,
     "checkin_enabled": true,
     "growth_enabled": true,
