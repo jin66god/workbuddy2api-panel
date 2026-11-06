@@ -96,7 +96,10 @@ jobs:
               cancelled=$((cancelled + 1))
               echo "  → 已发出取消请求"
             else
-              reason=$(echo "$out" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-200)
+              # 从 gh 的错误输出里只取 message 字段，避免整段 JSON 塞进表格
+              reason=$(echo "$out" | grep -o '"message":"[^"]*"' | head -1 \
+                | sed 's/"message":"//; s/"$//')
+              [ -z "$reason" ] && reason=$(echo "$out" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-160)
               echo "  → 取消失败：$reason"
               failed_ids+=("$id|$name|$branch|$status|$created|$url|$reason")
             fi
@@ -126,7 +129,7 @@ jobs:
           body=$(mktemp)
           {
             echo "定时扫描发现 **${#failed_ids[@]}** 条运行卡在 \`in_progress\` / \`queued\` 超过 ${MAX_AGE_HOURS} 小时，"
-            echo "且 \`gh run cancel\` 无法取消。"
+            echo "取消接口也拒绝处理（409）。"
             echo
             echo "这类状态通常是 GitHub 侧状态死锁：API 投影仍是运行中，内部已按完成处理，"
             echo "因此 cancel / force-cancel / rerun / delete 会互相矛盾地全部被拒。"
