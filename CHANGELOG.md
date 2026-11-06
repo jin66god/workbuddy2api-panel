@@ -3,10 +3,16 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
-## 未发布
+## v1.24.3（2026-11-06）
 
 ### 修复
 
+- **流式请求的客户端中断不再被记成上游故障**：客户端在拿到上游响应头之前断开（用户点停止、
+  前置 CDN 回源超时、客户端自身 timeout）时，这一跳此前被当成网络抖动处理——健康账号被记一次
+  连败（达到阈值即临时降权出池）、会话粘性被解绑，末端还往已关闭的连接写 503
+  `no_healthy_account`，把一次客户端中断统计成上游不可用。现在与非流式同一口径：记 499 +
+  `interrupted`，不写响应体、不喂连败计数、不解绑粘性；上游真正返回 4xx/5xx 时仍保留原有归因
+  与账号处置，空闲看门狗掐流的上游停滞判定不受影响。
 - **`config.example.json` 的抖动默认值会把防指纹功能关掉**：代码 `Default()` 把
   `schedule.balance_refresh_jitter_permill` / `task_sweep_jitter_permill` 缺省设为 `150`，
   README 字段表也写 `150`，但示例文件里显式写了 `0`。`Load` 是「先取默认值再 unmarshal 覆盖」，
