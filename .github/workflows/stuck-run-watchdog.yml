@@ -44,6 +44,8 @@ jobs:
       - name: 扫描并处理卡死运行
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gh 未 checkout 时无法从 git 推断仓库，所有命令必须靠 GH_REPO 定位
+          GH_REPO: ${{ github.repository }}
           REPO: ${{ github.repository }}
           SELF_RUN_ID: ${{ github.run_id }}
           MAX_AGE_HOURS: ${{ inputs.max_age_hours || '2' }}
@@ -88,7 +90,9 @@ jobs:
               continue
             fi
 
-            if out=$(gh run cancel "$id" 2>&1); then
+            # 直接打 API 而不是 gh run cancel：后者依赖 git 上下文，
+            # 未 checkout 的工作区里会报 "failed to determine base repo"。
+            if out=$(gh api -X POST "repos/$REPO/actions/runs/$id/cancel" 2>&1); then
               cancelled=$((cancelled + 1))
               echo "  → 已发出取消请求"
             else
