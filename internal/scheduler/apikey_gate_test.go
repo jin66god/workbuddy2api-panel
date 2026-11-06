@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/cst"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
@@ -41,7 +42,7 @@ func apiKeyTestScheduler(t *testing.T, apiKey bool) (*Scheduler, *recorderUpstre
 func TestAPIKeyGateSkipsGrowthTasks(t *testing.T) {
 	// 夜猫子窗口守卫先于账号循环：钉住时钟，避免该子用例的判别力依赖运行环境墙钟。
 	restoreClock := nowForNightWindow
-	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 7, 23, 30, 0, 0, time.Local) }
+	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 7, 23, 30, 0, 0, cst.Zone()) }
 	t.Cleanup(func() { nowForNightWindow = restoreClock })
 
 	cases := []struct {

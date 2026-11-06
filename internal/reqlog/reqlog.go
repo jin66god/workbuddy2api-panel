@@ -590,7 +590,9 @@ func archiveFileOutsideWindow(name string, f Filter) bool {
 	if len(rest) < 10 {
 		return false
 	}
-	day, err := time.ParseInLocation("2006-01-02", rest[:10], time.Local)
+	// 归档文件名由 cst.Day 生成，解析必须同口径：用 time.Local 会在非 CST 宿主上
+	// 把整档误判成「早于窗口」而跳过（面板时间区间查询丢数据）。
+	day, err := time.ParseInLocation("2006-01-02", rest[:10], cst.Zone())
 	if err != nil {
 		return false
 	}
