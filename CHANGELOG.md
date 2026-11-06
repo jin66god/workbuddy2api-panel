@@ -23,8 +23,10 @@
 ### CI
 
 - **新增 `stuck-run-watchdog`**：每 3 小时扫描状态停在 `in_progress` / `queued` 且超过
-  2 小时的运行，能取消的直接 `gh run cancel`，取消不掉的汇总成一个 `ci-stuck` issue
-  （已有开启中的 issue 则追加评论）。起因是一次矩阵腿未被创建导致 `publish` 被 skip、
+  2 小时的运行，能取消的直接调 cancel 接口；取消不掉的汇总成一个 `ci-stuck` issue，
+  正文带 run 链接与报错原文。三条分支全自动闭环：扫不到卡死运行就自动关闭该 issue；
+  全部取消成功则只记日志；已有开启中的 issue 时按 run id 去重，只在出现新运行时才追加
+  评论（避免同两条僵尸每 3 小时刷屏）。起因是一次矩阵腿未被创建导致 `publish` 被 skip、
   运行永远不收敛，挂了 11 小时才被偶然发现——这类死锁所有补救接口都会互相矛盾地失败
   （cancel 说已完成 / force-cancel 说不在运行 / rerun 说正在运行 / delete 403），
   只能靠监控暴露出来再找 GitHub Support。支持 `workflow_dispatch` 手动触发，

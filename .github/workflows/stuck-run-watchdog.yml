@@ -7,10 +7,12 @@ name: stuck-run-watchdog
 # 不在运行、rerun 说正在运行、delete 返回 403）。这类死锁只能人工跟进，但没有监控
 # 时根本不会有人发现——曾有一条挂 11 小时才被偶然看到。
 #
-# 本 workflow 做两件事：
-#   1) 能取消的直接取消（绝大多数卡死属于 runner 侧，cancel 有效）；
-#   2) 取消不掉的汇总成一个 issue（去重：已有开启中的 issue 就追加评论），
-#      把 run URL 和原始报错留在里面，方便照单找 GitHub Support。
+# 行为（三条分支，全自动闭环）：
+#   1) 扫不到任何卡死运行 → 自动关闭 ci-stuck issue；
+#   2) 有卡死但全部取消成功 → 只记日志，不开 issue；
+#   3) 取消不掉的 → 按 ci-stuck 标签汇总成 issue，正文带 run 链接与报错原文。
+#      已有开启中的 issue 时，只在出现「正文没记录过的 run id」时追加评论，
+#      避免同两条僵尸每 3 小时刷一条重复评论。
 on:
   schedule:
     # 每 3 小时一次，避开整点（GitHub 定时任务在整点最拥挤，常被延迟数十分钟）
@@ -22,16 +24,16 @@ on:
         required: false
         default: '2'
       dry_run:
-        description: '只报告不取消（true / false）'
+        description: '只报告不取消、不建/关 issue（true / false）'
         required: false
         default: 'false'
 
 permissions:
   actions: write   # 取消运行
-  issues: write    # 开 / 更新提醒 issue
+  issues: write    # 建 / 评论 / 关闭提醒 issue
   contents: read
 
-# 自身不并发，避免两次扫描同时开 issue
+# 自身不并发，避免两次扫描同时操作同一个 issue
 concurrency:
   group: stuck-run-watchdog
   cancel-in-progress: false
@@ -73,7 +75,7 @@ jobs:
 
           stuck=0
           cancelled=0
-          failed_ids=()
+          failed_rows=()
           while IFS=$'\t' read -r id name branch created status url; do
             [ -z "${id:-}" ] && continue
             # 跳过自己
@@ -86,7 +88,7 @@ jobs:
             echo "  $url"
 
             if [ "$DRY_RUN" = "true" ]; then
-              failed_ids+=("$id|$name|$branch|$status|$created|$url|dry-run 未尝试取消")
+              failed_rows+=("$id|$name|$branch|$status|$created|$url|dry-run 未尝试取消")
               continue
             fi
 
@@ -96,39 +98,83 @@ jobs:
               cancelled=$((cancelled + 1))
               echo "  → 已发出取消请求"
             else
-              # 从 gh 的错误输出里只取 message 字段，避免整段 JSON 塞进表格
+              # 只取 message 字段，避免整段 JSON 塞进表格
               reason=$(echo "$out" | grep -o '"message":"[^"]*"' | head -1 \
                 | sed 's/"message":"//; s/"$//')
               [ -z "$reason" ] && reason=$(echo "$out" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-160)
               echo "  → 取消失败：$reason"
-              failed_ids+=("$id|$name|$branch|$status|$created|$url|$reason")
+              failed_rows+=("$id|$name|$branch|$status|$created|$url|$reason")
             fi
           done < "$tmp"
 
           echo
-          echo "扫描完成：卡死 $stuck 条，取消成功 $cancelled 条，取消失败 ${#failed_ids[@]} 条"
+          echo "扫描完成：卡死 $stuck 条，取消成功 $cancelled 条，取消失败 ${#failed_rows[@]} 条"
 
-          if [ ${#failed_ids[@]} -eq 0 ]; then
-            echo "无需开 issue。"
+          # ---------- 分支 1：本轮没有任何卡死运行 → 自动关闭 issue ----------
+          if [ "$stuck" -eq 0 ]; then
+            open_issue=$(gh issue list --label ci-stuck --state open --limit 1 \
+              --json number --jq '.[0].number // empty' 2>/dev/null || true)
+            if [ -z "$open_issue" ]; then
+              echo "无卡死运行，且没有开启中的 ci-stuck issue。"
+              exit 0
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "dry_run=true：本应关闭 issue #$open_issue（未发现卡死运行）"
+              exit 0
+            fi
+            echo "未发现卡死运行，关闭 issue #$open_issue"
+            gh issue comment "$open_issue" --body \
+              "本轮扫描未发现卡在 \`in_progress\` / \`queued\` 超过 ${MAX_AGE_HOURS}h 的运行，自动关闭。"
+            gh issue close "$open_issue" --reason completed
+            exit 0
+          fi
+
+          # ---------- 分支 2：有卡死运行，但全部取消成功 → 不开 issue ----------
+          if [ ${#failed_rows[@]} -eq 0 ]; then
+            echo "卡死运行已全部发出取消请求，无需开 issue。"
             exit 0
           fi
 
           if [ "$DRY_RUN" = "true" ]; then
-            echo "dry_run=true：以下运行会被上报，但不创建 issue、不取消："
-            for row in "${failed_ids[@]}"; do
+            echo "dry_run=true：以下运行会被上报，但不取消、不建 issue："
+            for row in "${failed_rows[@]}"; do
               IFS='|' read -r id name branch status created url reason <<< "$row"
               echo "  #$id $name [$branch] $status $created $url"
             done
             exit 0
           fi
 
-          # ---- 汇总 issue（去重）----
+          # ---------- 分支 3：取消不掉的运行 → 汇总 issue（按 run id 去重）----------
           gh label create ci-stuck --color BFB8FF \
             --description "CI 运行卡死，需人工或 GitHub Support 处理" >/dev/null 2>&1 || true
 
+          existing=$(gh issue list --label ci-stuck --state open --limit 1 \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+
+          if [ -n "$existing" ]; then
+            # 已有 issue：只有出现「正文里没记录过的 run id」时才追加评论，
+            # 否则同两条僵尸会每 3 小时刷一条重复评论。
+            known=$(gh issue view "$existing" --json body --jq .body)
+            fresh=()
+            for row in "${failed_rows[@]}"; do
+              IFS='|' read -r id _ <<< "$row"
+              if echo "$known" | grep -q "#$id"; then
+                echo "run #$id 已在 issue #$existing 中记录，跳过"
+              else
+                fresh+=("$row")
+              fi
+            done
+            if [ ${#fresh[@]} -eq 0 ]; then
+              echo "全部已记录，无需追加评论。"
+              exit 0
+            fi
+            echo "issue #$existing 中有 ${#fresh[@]} 条新卡死运行，追加评论"
+            failed_rows=("${fresh[@]}")
+          fi
+
           body=$(mktemp)
           {
-            echo "定时扫描发现 **${#failed_ids[@]}** 条运行卡在 \`in_progress\` / \`queued\` 超过 ${MAX_AGE_HOURS} 小时，"
+            echo "定时扫描发现 **${#failed_rows[@]}** 条运行卡在 \`in_progress\` / \`queued\` 超过 ${MAX_AGE_HOURS} 小时，"
             echo "取消接口也拒绝处理（409）。"
             echo
             echo "这类状态通常是 GitHub 侧状态死锁：API 投影仍是运行中，内部已按完成处理，"
@@ -136,23 +182,20 @@ jobs:
             echo
             echo "| run | workflow | 分支 | 状态 | 创建时间 | 取消失败原因 |"
             echo "|---|---|---|---|---|---|"
-            for row in "${failed_ids[@]}"; do
+            for row in "${failed_rows[@]}"; do
               IFS='|' read -r id name branch status created url reason <<< "$row"
               echo "| [#$id]($url) | $name | \`$branch\` | $status | $created | ${reason//|/\\|} |"
             done
             echo
-            echo "<sub>由 \`.github/workflows/stuck-run-watchdog.yml\` 自动生成 · $(date -u +%Y-%m-%dT%H:%M:%SZ)</sub>"
+            echo "<sub>由 \`.github/workflows/stuck-run-watchdog.yml\` 生成 · $(date -u +%Y-%m-%dT%H:%M:%SZ)</sub>"
           } > "$body"
 
-          existing=$(gh issue list --label ci-stuck --state open --limit 1 \
-            --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
-            echo "已有开启中的 issue #$existing，追加评论"
             gh issue comment "$existing" --body-file "$body"
           else
             echo "新建 issue"
             gh issue create \
-              --title "CI 运行卡死：${#failed_ids[@]} 条无法取消的 in_progress/queued 运行" \
+              --title "CI 运行卡死：${#failed_rows[@]} 条无法取消的 in_progress/queued 运行" \
               --label ci-stuck \
               --body-file "$body"
           fi
