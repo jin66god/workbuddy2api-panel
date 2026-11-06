@@ -3,6 +3,28 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.24.4（2026-11-06）
+
+### 修复
+
+- **日界一律按北京时间（UTC+8）判定**：新增 `internal/cst` 包，统一档位计算、签到日键、
+  硬冷却「次日 04:00」、补签「昨天」、夜猫子窗口、摊开日键与请求归档切天的时区口径。
+  此前这些判定跟着宿主时区走：容器跑在 UTC 时 `activity_hours=[10]` 实际在 CST 18:00
+  触发，硬冷却的「次日 04:00」落在 CST 12:00（签到早已结束），夜猫子窗口整体错位 8 小时
+  ——不报错，只静默少拿积分。带 `TZ=Asia/Shanghai` 的部署不受影响，裸 `docker run`
+  或 UTC 主机此前一直在错跑。
+
+### 加固
+
+- **状态文件落盘改为掉电安全**：新增 `internal/safefile`，写临时文件后先 `fsync` 再
+  `rename`，并把上一版留成 `<path>.bak`；`state.json` 读取时若内容损坏（掉电后典型的
+  「长度正确、内容全 0」）自动从 `.bak` 恢复并打 WARN。此前 `pool / auth / usage /
+  credithist / model_catalog` 五处都是裸 `tmp + rename`——rename 只保证原子可见性，
+  不保证内容已落盘。
+- **面板鉴权改为默认拒绝**：`Panel.ServeHTTP` 统一过闸，只有页面骨架与三个静态资源
+  匿名放行，其余路径（含尚未注册的路径）一律 401。此前 40+ 条路由逐条包 `withAuth`，
+  新增一条忘了包就是静默公开；`withAuth` 保留作二次校验。
+
 ## v1.24.3（2026-11-06）
 
 ### 修复
