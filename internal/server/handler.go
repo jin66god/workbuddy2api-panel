@@ -1067,6 +1067,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.As(terr, &uerr) {
 			status = uerr.Status
 		}
+		// 客户端在拿到上游响应头之前就走了（用户点停止 / 前置 CDN 回源超时 /
+		// AsyncOpenAI 类客户端 timeout）：这里的传输层错误只是 context.Canceled 的
+		// 投影，归因是「人走了」，不是上游故障，更不是账号的问题。
+		// 此前它和真抖动共用一条分支：NoteFailures 给健康号喂一次连败（达阈降权出池）、
+		// fail 解绑粘性，末端再回 503 no_healthy_account，把客户端中断记成上游不可用。
+		// 非流式的同类误判已按 499 口径修过（见下方 Aggregate 分支），流式这条在
+		// 「响应头未到」的窗口里仍是老行为。
+		// 只覆盖 uerr == nil：上游真回了 4xx 信封时保留原归因与账号处置。
+		// 客户端仍在但 ctx 被取消（空闲看门狗掐流）不会命中——看门狗取消的是派生 ctx，
+		// r.Context() 不 done（与 isUpstreamTimeout 的 clientGone 判据同源）。
+		if uerr == nil && terr != nil && r.Context().Err() != nil {
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			st.status = 499
+			st.outcome = reqlog.OutcomeInterrupted
+			log.Printf("WARN: [server] stream acct=%s model=%s: 调用方断开（%v），未写回程、不罚号",
+				logfmt.Label(acct.UID, acct.Nickname), bareModel, terr)
+			return
+		}
 		if uerr == nil && terr != nil {
 			// 上游超时 / 停滞：**不换号、不罚号**。
 			//

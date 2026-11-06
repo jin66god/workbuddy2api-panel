@@ -83,3 +83,60 @@ func TestChatSyncClientCancelIsNotUpstreamParse(t *testing.T) {
 		t.Fatalf("断开原因原文应留在日志里: %s", out)
 	}
 }
+
+// TestChatStreamClientCancelBeforeHeaders 钉住流式的同一口径：请求是 stream，
+// 客户端在「上游响应头还没到」时走掉（用户点停止 / CDN 回源超时 / 客户端 timeout）。
+// 此前这一跳被当成网络抖动：NoteFailures 给健康号喂一次连败（达阈降权出池）、
+// fail 解绑粘性，末端还回 503 no_healthy_account —— 一次客户端中断被记成上游不可用。
+func TestChatStreamClientCancelBeforeHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	var once sync.Once
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			once.Do(func() { close(entered) })
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	// 连败阈值压到 1：只要喂一次 NoteFailures，这个号就会被降权出池，断言才有区分度。
+	p.SetDegrade(1, time.Hour, time.Hour)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	var buf strings.Builder
+	old := log.Writer()
+	log.SetOutput(&buf)
+	done := make(chan struct{})
+	go func() { h.ServeHTTP(rec, req); close(done) }()
+	<-entered
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		log.SetOutput(old)
+		t.Fatal("handler 未在 ctx 取消后返回（卡在上游连接）")
+	}
+	log.SetOutput(old)
+	if rec.Body.Len() != 0 {
+		t.Fatalf("客户端已断开，不该还写响应体: %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK { // NewRecorder 的默认值，表示 handler 没写过头
+		t.Fatalf("客户端已断开，不该写状态码 %d", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "调用方断开") {
+		t.Fatalf("应落一条调用方断开的日志: %s", out)
+	}
+	if strings.Contains(out, "连败降权触发") {
+		t.Fatalf("客户端断连不该给健康号喂连败计数: %s", out)
+	}
+	if a := p.Pick(); a == nil {
+		t.Fatal("客户端断连不该把健康号降权出池")
+	}
+}
