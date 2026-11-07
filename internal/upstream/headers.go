@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/loginsite"
@@ -213,6 +214,11 @@ type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：透传入站值，空则生成请求级兜底
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	// HeaderBudget 本次尝试「等到响应头」的预算上限（0 = 不额外约束，仍受
+	// ResponseHeaderTimeout 约束）。网关按客户端剩余 deadline 收敛后传入，
+	// 避免客户端只剩几秒时还按 120s 硬等——那样用户只会拿到无信息量的 499。
+	// 只约束**响应头之前**：Do 返回后立刻停表，正文/长生成不受影响。
+	HeaderBudget time.Duration
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。

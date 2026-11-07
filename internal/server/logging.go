@@ -43,6 +43,14 @@ var chatLogOut io.Writer = os.Stdout
 func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
+// 中断阶段（P2）：499 的排障价值全在「上游到底响应了没有」。以前只有 TTFB=-，
+// 无法区分「上游一直没回头」与「生成到一半人走了」——前者是该换上游/调大超时，
+// 后者多半是客户端配置或用户操作。
+const (
+	phasePreHeader = "pre_header" // 上游响应头尚未返回
+	phaseStreaming = "streaming"  // 响应头已到，正文透传/读取中
+)
+
 type chatStat struct {
 	start            time.Time
 	model            string
@@ -54,6 +62,7 @@ type chatStat struct {
 	status           int
 	requestID        string
 	outcome          string
+	phase            string // 中断阶段：pre_header / streaming，仅 interrupted 行有值
 	attempts         int
 	credit           float64
 	hasCredit        bool
@@ -102,8 +111,10 @@ func (s *chatStat) done() {
 			effort = s.effortReq + "->" + s.effortEff
 		}
 	}
+	// 上游劣化滑窗（P1）：所有 chat 请求都从这里出去，是唯一必经过的汇聚点。
+	chatUpstreamHealth.record(s.status, s.outcome, s.ttfb)
 	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks,
-		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent, effort)
+		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent, effort, s.phase)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -660,14 +671,14 @@ const (
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
-	logChatRowEx(ttfb, total, model, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "", "")
+	logChatRowEx(ttfb, total, model, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "", "", "")
 }
 
 // logChatRowEx 是带请求 ID、结果、重试、积分与调用来源字段的扩展流水行。旧调用保持
 // 原格式；requestID 非空时才追加扩展字段；来源两参均为空时不追加来源段。
 func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
-	clientIP, userAgent, effort string) {
+	clientIP, userAgent, effort, phase string) {
 	if !chatLogEnabled {
 		return
 	}
@@ -703,12 +714,22 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		creditField := "-"
 		if hasCredit {
 			creditField = fmt.Sprintf("%.4f", credit)
+			// 多跳请求的 credit 是**各跳累计观测值**（换号重试会多次真实计费），
+			// 标 (sumN) 才能和「单跳正常价」区分开——2026-11-07 有一条 try=2 的
+			// 7.67 被误读成单价异常，实际是两跳合计。对账时看这个后缀。
+			if attempts > 1 {
+				creditField += fmt.Sprintf("(sum%d)", attempts)
+			}
 		}
 		extra = fmt.Sprintf(" rid=%s | out=%s | try=%d | credit=%s |", requestID, outcome, attempts, creditField)
 	}
 	// 调用来源：IP 用可解析的裸值（便于 grep），UA 用 ShortUA 压缩后的客户端标签
 	// 并加引号（标签内可能含空格，如 `OpenAI/Python 1.30.0` 只会取到 OpenAI/Python）。
 	// 两者都未采集时不追加，旧行格式保持不变。
+	phaseField := ""
+	if phase != "" {
+		phaseField = fmt.Sprintf(" phase=%s |", phase)
+	}
 	src := ""
 	if clientIP != "" || userAgent != "" {
 		ua := "-"
@@ -721,7 +742,7 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 	if effort != "" {
 		effortField = effort
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | effort=%s | total=%.1fs |%s%s\n",
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | effort=%s | total=%.1fs |%s%s%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -734,6 +755,7 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		logfmt.Pad(effortField, chatEffortWidth),
 		total.Seconds(),
 		extra,
+		phaseField,
 		src,
 	)
 }

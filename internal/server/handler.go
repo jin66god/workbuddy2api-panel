@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/loglv"
 	"io"
 	"log"
 	"net"
@@ -939,6 +940,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
+		// 剩余预算检查（P0）：客户端 deadline 是整条请求的预算，上一跳花光后
+		// 再发一跳注定被取消，用户只会拿到无信息量的 499。这里提前止损回 504。
+		// budget>0 时同时收敛「等响应头」的时长（见 ChatMeta.HeaderBudget）。
+		budget, ok := attemptBudgetFor(r.Context())
+		if !ok {
+			lastErr = errClientDeadline
+			st.status = http.StatusGatewayTimeout
+			break
+		}
+		chatMeta.HeaderBudget = budget
+
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -1081,6 +1093,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = 499
 			st.outcome = reqlog.OutcomeInterrupted
+			st.phase = phasePreHeader // 响应头都还没到：不知道上游是否已开始生成
 			log.Printf("WARN: [server] stream acct=%s model=%s: 调用方断开（%v），未写回程、不罚号",
 				logfmt.Label(acct.UID, acct.Nickname), bareModel, terr)
 			return
@@ -1395,6 +1408,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
 				st.outcome = reqlog.OutcomeInterrupted
+				st.phase = phaseStreaming // 上游帧已开始透传，客户端中途离开
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				if sessKey != "" && h.cfg.Session != nil {
@@ -1442,7 +1456,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 反例边界：没声明 tools 的纯对话出现 stop 完全正常，故必须带 len>0。
 			if repair.Converted() == 0 && len(declaredTools) > 0 && stats.ToolCalls() == 0 &&
 				stats.FinishReason() == "stop" && !stats.SawErrorFrame() {
-				log.Printf("INFO: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (本轮无工具调用，正常收尾)",
+				loglv.Debugf("INFO: [server] stream acct=%s model=%s: finish_reason=stop with zero tool_calls despite %d declared tool(s) (本轮无工具调用，正常收尾)",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, len(declaredTools))
 			}
 			st.ttfb = stats.TTFB()
@@ -1480,6 +1494,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, cerr)
 				st.status = 499
 				st.outcome = reqlog.OutcomeInterrupted
+				st.phase = phaseStreaming // 上游响应头已到（Aggregate 读 body 时被取消）
 				return
 			}
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
@@ -1549,6 +1564,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		code = "upstream_timeout"
 		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
 	}
+	// 客户端预算耗尽（P0）：不再发新一跳，回 504 让调用方区分「上游慢」与「我自己的
+	// deadline 快到了」。以前这种请求会被客户端自己取消，只留一条 499 无从诊断。
+	if errors.Is(lastErr, errClientDeadline) {
+		status = http.StatusGatewayTimeout
+		code = "client_deadline_exceeded"
+		msg = "request deadline is nearly exhausted (client timeout): no budget left for another upstream attempt; raise the client timeout and retry"
+	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）走 noHealthyHint —— 裸名落错域时改写成带前缀的指引。
 	hint := h.noHealthyHint(peek.Model, realm, bareModel)
@@ -1589,6 +1611,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "upstream_busy"
 			status = queueBusyStatus(w, ue.Msg)
 			msg = "upstream capacity is full (queue.full); retry after a short wait"
+		case upstream.ErrProviderUnavailable:
+			// provider 侧不可用（11134）：503 + 短 Retry-After。上游原文（含
+			// requestId）在下方统一透传，客户端可拿去对账或反馈上游。
+			status = http.StatusServiceUnavailable
+			code = "provider_unavailable"
+			msg = "model provider is temporarily unavailable upstream; retry after a short wait"
+			w.Header().Set("Retry-After", "5")
 		case upstream.ErrModelBusy:
 			// 14003 模型后端间歇繁忙：503 + 可重试语义，并带 Retry-After。
 			// 不能用 400 model_unavailable —— 那是「换模型」的信号，
@@ -1743,6 +1772,48 @@ func rotateBackoff(i int, ctx context.Context) bool {
 
 // errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案。
 var errUpstreamTimeout = errors.New("upstream timeout")
+
+// errClientDeadline 客户端自己的 deadline 已不足以再发一跳上游请求。
+//
+// 与 errUpstreamTimeout 的区别：那是「上游慢」，这是「调用方给的时间本来就快用完
+// 了」。两者都终止轮转，但末端状态码不同（503 vs 504），运维据此判断是该扩容上游
+// 还是该让客户端调大 timeout。
+var errClientDeadline = errors.New("client deadline nearly exhausted")
+
+// 剩余预算收敛（P0）。客户端 deadline 是整条请求（含所有换号重试）的预算，
+// 但每一跳的上游调用此前只受 ResponseHeaderTimeout（默认 120s）约束——
+// 2026-11-07 实案：60s 预算的请求第一跳撞 11134（瞬时），第二跳带着 120s 的
+// header 超时硬等，27s 后被客户端自己的 deadline 取消，用户拿到的是什么都没有
+// 的 499，而不是「上游 provider 不可用」。
+//
+// 规则：
+//   - 没有 deadline（本地 curl / 服务端调用）→ 不设上限，行为完全不变；
+//   - remaining 已不足 minAttemptBudget → 不再发新请求，末端 504；
+//   - 否则预算 = remaining - attemptDeadlineMargin，留出把 5xx/超时写回客户端的
+//     时间。预算大于 ResponseHeaderTimeout 时后者先触发，语义与旧行为一致——
+//     这个 ctx 只会「更早」结束，永不放宽既有超时。
+const (
+	attemptDeadlineMargin = 1500 * time.Millisecond
+	minAttemptBudget      = 2 * time.Second
+)
+
+// attemptBudgetFor 计算本跳可用的 ctx 预算。返回 0 表示不设上限（调用方无 deadline）。
+// ok=false 表示剩余预算已不足以再发一次上游请求。
+func attemptBudgetFor(ctx context.Context) (time.Duration, bool) {
+	dl, has := ctx.Deadline()
+	if !has {
+		return 0, true
+	}
+	remaining := time.Until(dl)
+	if remaining < minAttemptBudget {
+		return 0, false
+	}
+	budget := remaining - attemptDeadlineMargin
+	if budget < time.Second {
+		return 0, false
+	}
+	return budget, true
+}
 
 // isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。超时不是账号的
 // 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。
@@ -1909,6 +1980,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 账号本身健康：不冷却、不熔断、不累计错误计数，也不轮转（见 chat 循环的
 		// ErrChannelRefused 分支：直接透传上游原文回 400）。与 ErrContentBlocked
 		// 同待遇，由调用方决定是否终止轮转。
+	case upstream.ErrProviderUnavailable:
+		// 11134「model provider is temporarily unavailable」是**provider 侧**故障：
+		// 账号余额、会话、限流额度全都正常，唯一的错是这一跳落到的推理后端挂了。
+		// 零动作（不冷却/不熔断/不 NoteError/不喂连败）——这是全仓第 N 次踩同一个坑：
+		// 任何「按账号记账」的处置都会把一次上游故障放大成整池熔断（3 次触发 30 分钟
+		// 起、封顶 6h）。换号仍继续（不同号可能落到健康分片），退避由 rotateBackoff 负责。
+		// 末端 503 + Retry-After 透传上游原文（含 requestId），客户端可短退避重试。
 	case upstream.ErrGatewayDown:
 		// CF 回源失败是渠道级故障：所有账号共用同一入口，换号改变不了回源。
 		// 零动作（不冷却/不熔断/不 NoteError），chat 循环已 fail-fast 终止轮转。

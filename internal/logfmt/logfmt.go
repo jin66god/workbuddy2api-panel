@@ -12,6 +12,8 @@
 package logfmt
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 )
@@ -163,4 +165,57 @@ func runeWidth(r rune) int {
 		return 2
 	}
 	return 1
+}
+
+// ErrorBody 把上游错误 body 压成一行可读日志。
+//
+// 背景：上游 5xx 的 body 常见形态是
+//
+//	{"code":11134,"msg":"…","requestId":"…","extError":{"code":"internal_error","msg":"…"}}
+//
+// 直接按字节截断（旧做法 200 字节）会把后半段切开——2026-11-07 的线上日志里
+// 只剩 `"extError":{"code":"internal_error","m`，排障时拿不到 extError 的 msg，
+// 也看不出 body 还有多长。这里短 body 原样返回；超长时按 JSON 结构挑出
+// code / msg / requestId / extError.code / extError.msg 重排，末尾标出原始字节数；
+// 非 JSON（HTML 拦截页、纯文本）退回 Truncate。
+func ErrorBody(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if n <= 0 || s == "" {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return Truncate(s, n)
+	}
+	var parts []string
+	add := func(label string, v any) {
+		switch t := v.(type) {
+		case string:
+			if t = strings.TrimSpace(t); t != "" {
+				parts = append(parts, label+"="+Truncate(t, 120))
+			}
+		case float64:
+			parts = append(parts, label+"="+fmt.Sprintf("%v", t))
+		}
+	}
+	// 字段顺序 = 截断优先级：code / requestId / ext.code 都是短标识且排障必需
+	// （requestId 是向上游反馈的唯一票据），msg 可能有上百字，放后面让它先被截。
+	// 2026-11-07 的日志里 requestId 恰好卡在旧的 200 字节切点上，整条丢了。
+	add("code", m["code"])
+	add("requestId", m["requestId"])
+	ext, _ := m["extError"].(map[string]any)
+	if ext != nil {
+		add("ext.code", ext["code"])
+	}
+	add("msg", m["msg"])
+	if ext != nil {
+		add("ext.msg", ext["msg"])
+	}
+	if len(parts) == 0 {
+		return Truncate(s, n)
+	}
+	return fmt.Sprintf("%s (+%d bytes)", Truncate(strings.Join(parts, " "), n), len(s))
 }

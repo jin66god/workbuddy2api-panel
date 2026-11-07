@@ -6,6 +6,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/loglv"
 	"log"
 	"math"
 	"strings"
@@ -254,7 +255,7 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	}
 	obj[key] = best
 	if effortRank[strings.ToLower(strings.TrimSpace(best))] > effortRank[reqStr] {
-		log.Printf("reasoning_effort floored model=%s %s -> %s", model, reqStr, best)
+		loglv.Debugf("reasoning_effort floored model=%s %s -> %s", model, reqStr, best)
 	} else {
 		log.Printf("reasoning_effort downgraded model=%s %s -> %s", model, reqStr, best)
 	}

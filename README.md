@@ -189,6 +189,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 模型黑名单 | `models.hidden`：列表过滤 + 点名调用 400，热生效 |
 | 11158 / 11102 区分 | 账号类型无权限与模型不存在分别避让；模型锁按 realm 隔离；全池无权限返回 400 而非 503 |
 | 6021 queue.full | 渠道级容量满载：不罚号、不轮转，末端 `503 upstream_busy` |
+| 11134 provider 不可用 | **provider 侧**（推理后端）故障：`code=11134 / the model provider is temporarily unavailable`。零惩罚（不冷却/不熔断/不喂连败）——账号是健康的，罚号会让一次上游故障把整池打进熔断；照常短退避换号（不同号可能落到健康分片），末端 `503 provider_unavailable` + `Retry-After: 5`，透传上游原文含 `requestId` |
 | 14003 model busy | 模型后端间歇繁忙：只停「账号 × 该模型」10s（不写账号级冷却），全池被挡且剩余 ≤10s 时请求内等一次再重试；超时 `503 model_busy` + `Retry-After` |
 | 11-128 / 11140 分流 | 11-128 通道校验失败是请求级错误：不罚号、不冷却、不轮转，原样透传 400；11140 账号限制连续 3 次才禁用并提示在 WorkBuddy 申诉 |
 | refresh 单飞 | 同账号并发 refresh 复用首个结果，避免 RT 反重放撞 `12153` 掉登录 |
@@ -528,11 +529,19 @@ Web 面板「账号池与流量治理」可分别配置策略和账号顺序，�
 
 聊天流（`stream` true / false 均同）**没有总时长上限**：聊天使用 `Timeout=0` 的专用 client，长思考 / 长输出不会被掐断。
 
+**客户端 deadline 收敛（多跳预算）**：调用方带 `timeout`（OpenAI SDK 常见 60s）时，网关按**整条请求**的剩余预算约束每一跳「等响应头」的时长，而不是每跳各自重来一次 `header_timeout_seconds`：
+
+- 剩余预算 < 2s → 不再发新一跳，直接 `504 client_deadline_exceeded`（可诊断，而不是等客户端自己掐断后只留一条 499）；
+- 否则本跳的等头预算 = `剩余 - 1.5s`，只覆盖「响应头之前」——头一到即停表，正文与长生成完全不受影响；
+- 无 `timeout` 的调用方（本地 curl / 服务端调用）行为不变。
+
+这样「第一跳撞上游 5xx、第二跳只剩几秒」的请求不会再白占一个在途名额和一次上游配额，也不会把上游的真实错误藏起来。
+
 ### 环境变量覆盖
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_DNS`(逗号分隔多个) · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_DNS`(逗号分隔多个) · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE` · `WB2A_LOG_LEVEL`（`debug` / `info` / `warn` / `error`，默认 `info`；兼容裸 `LOG_LEVEL`，优先级高于后者。`debug` 打开诊断细节：声明了 tools 却零 `tool_calls`、`reasoning_effort` 被抬到下限等，这类行是合法终态，默认不打以免淹没真异常）
 
 ## 核心行为语义
 

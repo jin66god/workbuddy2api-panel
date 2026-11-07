@@ -3,6 +3,44 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.24.5（2026-11-07）
+
+### 修复
+
+- **11134「provider 不可用」不再被当成账号级 5xx**：上游 `{"code":11134,"msg":"the model
+  provider is temporarily unavailable"}` 此前落 `ErrServer` → `NoteError` 喂熔断计数，
+  而 `breaker_threshold=3`、`breaker_cooldown=30m` 起（封顶 6h）——provider 抖三次就能把
+  健康号打进熔断，一次十分钟的上游故障足以逐号喂满、全池停摆。新增
+  `ErrProviderUnavailable`：零惩罚（不冷却/不熔断/不喂连败），照常短退避换号（不同号可能
+  落到健康分片），末端 `503 provider_unavailable` + `Retry-After: 5` 并透传上游原文。
+  结构化 code 判在限流关键词兜底之前：该 body 的 `extError` 可能夹带 `rate limit` 措辞。
+- **换号重试按客户端剩余 deadline 收敛**：此前每跳都用固定的
+  `header_timeout_seconds`（默认 120s），客户端 60s 预算的请求在第一跳撞 5xx 后，第二跳
+  会带着 120s 的超时硬等，直到客户端自己取消——用户只拿到一条无信息量的 499，日志里也
+  看不出上游说过什么（2026-11-07 15:07 实案）。现在按整条请求的剩余预算收敛：剩余 <2s
+  直接 `504 client_deadline_exceeded`；否则本跳等头预算 = `剩余 - 1.5s`，**只覆盖响应头
+  之前**（`ChatMeta.HeaderBudget`，头一到即停表），正文与长生成不受影响。无 `timeout`
+  的调用方行为完全不变。
+
+### 可观测
+
+- **499 行增加 `phase=pre_header|streaming`**：区分「上游一直没回头」与「正文透传中客户端
+  离开」，两者排查方向完全不同（前者查上游/调大超时，后者查客户端配置）。
+- **`try>1` 的 `credit` 标 `(sumN)`**：多跳请求的 credit 是各跳累计观测值，不标注会被误读
+  成单价异常（实案：一条 `try=2` 的 7.67 被当成单价 30 倍）。
+- **新增上游劣化滑窗告警**：5 分钟窗口内 `TTFB>=8s` 占比 ≥30%，或 5xx 占比 ≥10% 且 ≥3 条，
+  打**一条**聚合 `WARN`（10 分钟限频）。此前上游慢到 TTFB 中位 17.8s 时全部 `out=success`，
+  日志里一条警告都没有，客户端在自己的 60s 超时里连撞后直接停摆，监控面上毫无痕迹。
+- **上游错误 body 不再按字节硬截断**：`logfmt.ErrorBody` 对 JSON 保留
+  `code / requestId / extError.code / msg / extError.msg` 与原始字节数，非 JSON 回落截断。
+  旧实现会在第 200 字节处切出半句 JSON（实案：`"extError":{"code":"internal_error","m`）。
+- **`ERR` 级别修正**：调用方断开（`context canceled` / `DeadlineExceeded` 且调用方 ctx 已结束）
+  不再打 `ERR`——那是用户点停止，handler 随后按 499 + WARN 正确归因；上游自身的
+  `ResponseHeaderTimeout` 仍保留 `ERR`（那一刻调用方 ctx 还活着）。
+- **新增 `WB2A_LOG_LEVEL`（兼容 `LOG_LEVEL`）**：默认 `info`；`debug` 才输出诊断行。
+  「声明了 tools 却零 `tool_calls`」「`reasoning_effort` 被抬到下限」降级为 debug——两者都是
+  合法终态，此前占全部日志行的 7% 以上，巡检时全是噪音。
+
 ## v1.24.4（2026-11-06）
 
 ### 修复
