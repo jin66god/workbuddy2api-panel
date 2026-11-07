@@ -13,6 +13,13 @@ name: stuck-run-watchdog
 #   3) 取消不掉的 → 按 ci-stuck 标签汇总成 issue，正文带 run 链接与报错原文。
 #      已有开启中的 issue 时，只在出现「正文没记录过的 run id」时追加评论，
 #      避免同两条僵尸每 3 小时刷一条重复评论。
+#
+# 白名单（IGNORE_RUN_IDS）：
+#   个别运行会被 GitHub 永久锁死——API 投影永远是 in_progress / queued，cancel 永久
+#   返回 409，delete 403，只能等 GitHub Support。若该 run 对应的产物已完整、确认无
+#   实际影响，把 run id 加进白名单：扫描时直接跳过（不计入卡死数、不上报、不建 issue）。
+#   白名单在下方 step 的 env 里，空格或逗号分隔；workflow_dispatch 时可用同名输入临时覆盖。
+#   注意：进白名单后不再尝试取消（反正 409）。若某条 run 其实可救，先把它从白名单删掉再手动触发。
 on:
   schedule:
     # 每 3 小时一次，避开整点（GitHub 定时任务在整点最拥挤，常被延迟数十分钟）
@@ -27,6 +34,10 @@ on:
         description: '只报告不取消、不建/关 issue（true / false）'
         required: false
         default: 'false'
+      ignore_run_ids:
+        description: '临时覆盖白名单（空格/逗号分隔的 run id），留空则用文件内默认值'
+        required: false
+        default: ''
 
 permissions:
   actions: write   # 取消运行
@@ -52,6 +63,9 @@ jobs:
           SELF_RUN_ID: ${{ github.run_id }}
           MAX_AGE_HOURS: ${{ inputs.max_age_hours || '2' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # 永久锁死的运行 id（空格或逗号分隔）。换行/多空格会自动归一化。
+          # 写 none 表示临时清空白名单（用于复查这些 run 是否已被 GitHub 清理）。
+          IGNORE_RUN_IDS: ${{ inputs.ignore_run_ids || '42068167654 42068085742' }}
         run: |
           set -euo pipefail
 
@@ -62,6 +76,17 @@ jobs:
           cutoff=$(date -u -d "-${MAX_AGE_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)
           echo "阈值：创建时间早于 $cutoff（即已卡死超过 ${MAX_AGE_HOURS}h）"
           echo "dry_run=$DRY_RUN"
+
+          # 归一化白名单：逗号/换行/多空格统一成单空格，两侧补空格便于整词匹配。
+          ignore_ids=" ${IGNORE_RUN_IDS:-} "
+          ignore_ids="${ignore_ids//,/ }"
+          ignore_ids=$(printf '%s' "$ignore_ids" | tr -s '[:space:]' ' ')
+          if [ "$ignore_ids" = " none " ]; then
+            ignore_ids="  "
+            echo "白名单：已清空（none）"
+          else
+            echo "白名单 run id：$(printf '%s' "$ignore_ids" | xargs)"
+          fi
 
           # 只取 in_progress / queued 两种状态。waiting（等待部署审批）是合法状态，不处理。
           # 每页 100 条足够：本仓库历史运行总量远小于该值；超出的极端情况下一轮会补上。
@@ -75,11 +100,18 @@ jobs:
 
           stuck=0
           cancelled=0
+          ignored=0
           failed_rows=()
           while IFS=$'\t' read -r id name branch created status url; do
             [ -z "${id:-}" ] && continue
             # 跳过自己
             [ "$id" = "$SELF_RUN_ID" ] && continue
+            # 白名单：GitHub 永久锁死、产物已完整的运行，直接跳过（不取消、不计数、不上报）
+            if [[ "$ignore_ids" == *" $id "* ]]; then
+              ignored=$((ignored + 1))
+              echo "白名单跳过 #$id $name [$branch] status=$status created=$created"
+              continue
+            fi
             # created_at 是 ISO8601 Z，字符串比较对同格式有效
             [[ "$created" < "$cutoff" ]] || continue
 
@@ -108,7 +140,7 @@ jobs:
           done < "$tmp"
 
           echo
-          echo "扫描完成：卡死 $stuck 条，取消成功 $cancelled 条，取消失败 ${#failed_rows[@]} 条"
+          echo "扫描完成：白名单跳过 $ignored 条，卡死 $stuck 条，取消成功 $cancelled 条，取消失败 ${#failed_rows[@]} 条"
 
           # ---------- 分支 1：本轮没有任何卡死运行 → 自动关闭 issue ----------
           if [ "$stuck" -eq 0 ]; then
@@ -123,8 +155,12 @@ jobs:
               exit 0
             fi
             echo "未发现卡死运行，关闭 issue #$open_issue"
+            note=""
+            if [ "$ignored" -gt 0 ]; then
+              note="（其中 $ignored 条永久锁死的运行已在白名单内跳过，不再上报）"
+            fi
             gh issue comment "$open_issue" --body \
-              "本轮扫描未发现卡在 \`in_progress\` / \`queued\` 超过 ${MAX_AGE_HOURS}h 的运行，自动关闭。"
+              "本轮扫描未发现卡在 \`in_progress\` / \`queued\` 超过 ${MAX_AGE_HOURS}h 的运行，自动关闭。${note}"
             gh issue close "$open_issue" --reason completed
             exit 0
           fi
