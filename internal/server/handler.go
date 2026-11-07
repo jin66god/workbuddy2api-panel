@@ -653,10 +653,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
 	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
 	// 读 body 出错就地 400，不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
+	uploadStart := time.Now()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
+	}
+	// 慢上传可见性：读 body 的耗时是纯客户端侧成本，不计入任何上游指标。弱网或大
+	// body 时它会伪装成「TTFB 很长」，把排障引到上游。超阈值只打一条 WARN，不拦截
+	// （网关刻意不设 body 上限，见上方注释）。
+	if d := time.Since(uploadStart); d >= slowUploadWarn {
+		log.Printf("WARN: [server] slow upload: 读完请求体用了 %s（%d 字节，ua=%q）——客户端上传慢，勿当成上游 TTFB 高",
+			d.Round(time.Millisecond), len(body), logfmt.ShortUA(r.UserAgent()))
 	}
 	var peek struct {
 		Stream bool   `json:"stream"`
@@ -1247,7 +1255,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 按 SDK 退避重试即可；等待窗口过去渠道恢复即成功。
 			if kind == upstream.ErrUpstreamBusy {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				// 只释放租约，**不解绑会话粘性**：这是上游容量信号（6020/6021 排队、
+				// 11134 provider 过载），账号本身没有任何过错。换号会丢掉账号级
+				// prompt 前缀缓存（实测同号 97-99%、换号 0-12%），客户端按
+				// Retry-After 重试时理应回到同一个号。真换了号并成功，成功分支会用
+				// Bind 覆盖旧绑定，粘性照样跟随。
+				releaseHeld()
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					msg = "upstream capacity is full (queue.full); retry after a short wait"
@@ -1611,13 +1624,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "upstream_busy"
 			status = queueBusyStatus(w, ue.Msg)
 			msg = "upstream capacity is full (queue.full); retry after a short wait"
-		case upstream.ErrProviderUnavailable:
-			// provider 侧不可用（11134）：503 + 短 Retry-After。上游原文（含
-			// requestId）在下方统一透传，客户端可拿去对账或反馈上游。
-			status = http.StatusServiceUnavailable
-			code = "provider_unavailable"
-			msg = "model provider is temporarily unavailable upstream; retry after a short wait"
-			w.Header().Set("Retry-After", "5")
 		case upstream.ErrModelBusy:
 			// 14003 模型后端间歇繁忙：503 + 可重试语义，并带 Retry-After。
 			// 不能用 400 model_unavailable —— 那是「换模型」的信号，
@@ -1795,6 +1801,9 @@ var errClientDeadline = errors.New("client deadline nearly exhausted")
 const (
 	attemptDeadlineMargin = 1500 * time.Millisecond
 	minAttemptBudget      = 2 * time.Second
+	// slowUploadWarn 读请求体的耗时告警阈值：5s 以上的上传在流水行里会表现为
+	// 「TTFB 很长」，归因时必须能把客户端侧成本摘出去。
+	slowUploadWarn = 5 * time.Second
 )
 
 // attemptBudgetFor 计算本跳可用的 ctx 预算。返回 0 表示不设上限（调用方无 deadline）。
@@ -1980,13 +1989,6 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 账号本身健康：不冷却、不熔断、不累计错误计数，也不轮转（见 chat 循环的
 		// ErrChannelRefused 分支：直接透传上游原文回 400）。与 ErrContentBlocked
 		// 同待遇，由调用方决定是否终止轮转。
-	case upstream.ErrProviderUnavailable:
-		// 11134「model provider is temporarily unavailable」是**provider 侧**故障：
-		// 账号余额、会话、限流额度全都正常，唯一的错是这一跳落到的推理后端挂了。
-		// 零动作（不冷却/不熔断/不 NoteError/不喂连败）——这是全仓第 N 次踩同一个坑：
-		// 任何「按账号记账」的处置都会把一次上游故障放大成整池熔断（3 次触发 30 分钟
-		// 起、封顶 6h）。换号仍继续（不同号可能落到健康分片），退避由 rotateBackoff 负责。
-		// 末端 503 + Retry-After 透传上游原文（含 requestId），客户端可短退避重试。
 	case upstream.ErrGatewayDown:
 		// CF 回源失败是渠道级故障：所有账号共用同一入口，换号改变不了回源。
 		// 零动作（不冷却/不熔断/不 NoteError），chat 循环已 fail-fast 终止轮转。

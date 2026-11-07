@@ -45,4 +45,5 @@ docs/
 /cmd/desktopverify*/
 *.zip
 server.exe
+/server
 .DS_Store

@@ -3,6 +3,30 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.24.6（2026-11-07）
+
+### 修复
+
+- **11134 供应商过载回归「不罚号、不轮转」**：上一版把 11134 单独归为 `ErrProviderUnavailable`
+  并短退避换号——方向对、做法错。生产实测该错误 15 分钟内跨 6 个不同账号同时出现（provider
+  级过载），换号撞的是同一个后端，白耗在途名额；更贵的是会打断**账号级** prompt 前缀缓存
+  （实测同号命中 97-99%、换号后 0-12%），一段 74.9k 前缀重算远超等这几十秒。现在与
+  6020/6021 同族归 `ErrUpstreamBusy`：不罚号、不轮转，并按 body 里
+  `retry_policy.retry_after`（实测 40s）回 `429` + `Retry-After`，不再硬编码 5s。
+  上一版临时新增的 `ErrProviderUnavailable` 已删除。
+- **`ErrUpstreamBusy` 分支只释放租约、不解绑会话粘性**：排队/过载是上游容量信号，账号无过错；
+  解绑会让重试落到新号并重建整段前缀缓存。真换号成功时成功分支会用 `Bind` 覆盖旧绑定，
+  粘性照样跟随。6020/6021 一并受益。
+- **兜底 system 不再声明身份**：`ensureConsoleSystem` 与桌面端兜底注入原先写
+  `You are a helpful assistant.`——上游只校验「首条必须是 system」，正文写身份等于网关自己
+  往对话里插一句人设声明，与客户端 harness 自带的并列时会被模型当成外部注入而拒绝执行
+  （upstream issue #187）。改为只声明行为与语言。
+
+### 其他
+
+- **慢上传可见性**：读请求体耗时 ≥5s 打一条 WARN（含字节数与客户端 UA）。弱网/大 body 时
+  上传耗时会伪装成「TTFB 很长」，把排障引到上游；只观测不拦截（网关仍不设 body 上限）。
+
 ## v1.24.5（2026-11-07）
 
 ### 修复

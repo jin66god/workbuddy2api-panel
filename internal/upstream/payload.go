@@ -427,6 +427,13 @@ func dropReasoningContentParts(obj map[string]any) {
 	obj["messages"] = out
 }
 
+// consoleSystemFallback 兜底 system 正文：只写行为约定，**不声明身份**。
+//
+// 上游的判据只是「首条必须是 system」，正文不参与校验。写 "You are a helpful
+// assistant." 等于网关自己往对话里插一句身份声明，与客户端 harness 自带的人设并列时
+// 会被模型当成外部注入而拒绝执行（upstream issue #187）。这里只声明行为与语言。
+const consoleSystemFallback = "Follow the user's instructions and respond in the user's language."
+
 // ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45，防 console 域上游 code 11-128）：
 // 首条消息非 system 时在 messages 最前补一条 fallback system（"You are a helpful assistant."）。
 // 仅对 global 请求调用（CN 现状不动；即使首条就是 system 也不重复注入）。
@@ -449,7 +456,7 @@ func ensureConsoleSystem(body []byte) []byte {
 			return body // 首条已是 system：不注入
 		}
 	}
-	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
+	obj["messages"] = append([]any{map[string]any{"role": "system", "content": consoleSystemFallback}}, msgs...)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body

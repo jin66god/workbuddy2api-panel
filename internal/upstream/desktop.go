@@ -446,7 +446,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	body := map[string]any{
 		"model": "fast-model",
 		"messages": []any{
-			map[string]any{"role": "system", "content": "You are a helpful assistant. 当前处于中文环境，使用简体中文回答。"},
+			map[string]any{"role": "system", "content": "Follow the user's instructions and respond in the user's language. 当前处于中文环境，使用简体中文回答。"},
 			map[string]any{"role": "user", "content": "1+1等于几？直接回答。"},
 		},
 		"agent":          "cli",
