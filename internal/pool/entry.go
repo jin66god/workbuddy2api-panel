@@ -207,7 +207,9 @@ type entry struct {
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。
-	creditsExpiring          int64
+	creditsExpiring int64
+	// creditFrac 未满 1 分的扣费余数（小额请求累加用，不持久化：跨重启丢 <1 分可接受）。
+	creditFrac               float64
 	creditsEarliestExpiry    time.Time
 	creditsEarliestRemaining int64
 	// expiryBuckets 全部未来到期批次按自然日聚合（升序）。供面板快照展示与

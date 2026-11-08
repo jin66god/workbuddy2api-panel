@@ -3558,7 +3558,8 @@ function snapshotNoteText(count, d) {
   }
   const every = iv % 60 === 0 ? iv / 60 + ' 分钟' : iv + ' 秒';
   let tail = '每 ' + every + '后台刷新';
-  if (at && !isNaN(at)) {
+  // Go 零值时间（0001-01-01）解析成负数毫秒，直接算会得到「1065495620 分钟前」。
+  if (at > 0 && !isNaN(at)) {
     const min = Math.floor((Date.now() - at) / 60000);
     tail += '，' + (min < 1 ? '刚刚更新' : min + ' 分钟前更新');
   }

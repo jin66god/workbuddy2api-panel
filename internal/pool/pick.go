@@ -113,6 +113,11 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 		if len(expiringCands) > 0 {
 			cands = expiringCands
+		} else if p.expiringWarnAt.IsZero() || now.Sub(p.expiringWarnAt) >= 30*time.Minute {
+			// 开了优先却一个候选都没有：窗口是 0、刷新没在跑、最早批次已过期，三种都不报错，
+			// 开关只会静默失效——限频打一条，排障不用再猜。
+			p.expiringWarnAt = now
+			log.Printf("INFO: [pool] prefer_expiring 已开启，但池内没有可用的快过期批次（credits_expiring=0 或最早批次已过期）→ 本次按全量路由；检查 pool.expiring_soon 窗口与余额后台刷新是否在跑")
 		}
 	}
 	// 成本分层（reqModel 非空时）：按该模型的实测扣费把候选分层，只保留最优层。

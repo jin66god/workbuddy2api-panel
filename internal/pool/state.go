@@ -261,7 +261,14 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		return
 	}
 	if credit > 0 {
-		d := int64(credit + 0.5) // 四舍五入
+		// 小数累加：单笔 credit 常 <0.5（实测 0.14/0.24），逐笔四舍五入会把它们
+		// 全部抹成 0——账面 credits 与到期批次永不减少，面板看起来「一直在用但积分没动」。
+		// 先进余数累加器，攒够 1 分才落账，余数留到下次。
+		e.creditFrac += credit
+		d := int64(e.creditFrac)
+		if d > 0 {
+			e.creditFrac -= float64(d)
+		}
 		if d > e.credits {
 			d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
 		}

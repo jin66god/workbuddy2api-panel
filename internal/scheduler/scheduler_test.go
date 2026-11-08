@@ -196,6 +196,7 @@ type fakeUpstream struct {
 	refreshCalls   atomic.Int32
 	travelCalls    atomic.Int32
 	resourceRemain int64
+	resourceCalls  atomic.Int32
 	resourceEnd    string
 }
 
@@ -206,6 +207,7 @@ func (f *fakeUpstream) server() *httptest.Server {
 			f.checkinCalls.Add(1)
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			f.resourceCalls.Add(1)
 			// remain 需 <= size（取数钳 [0,size]：脏数据 remain>size 会被钳到 size
 			// ——上游真实数据恒一致，实测 Cycle{17,482,500}）。
 			end := ""

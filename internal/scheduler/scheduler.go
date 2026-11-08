@@ -126,6 +126,11 @@ type Scheduler struct {
 	// 供面板「到期提醒」标注数据年龄：卡片展示的是这份快照，必须让年龄可读，
 	// 否则界面 5 秒轮询会让人误以为数据也是 5 秒级新鲜。
 	lastBalanceRefresh atomic.Int64
+
+	// balanceStarted/sweepStarted 保证周期循环只起一次：Start* 可被 main 与热重载重复
+	// 调用，间隔热改统一走 Set*Interval，不重复起 goroutine。
+	balanceStarted atomic.Bool
+	sweepStarted   atomic.Bool
 }
 
 // New 构建。
@@ -947,15 +952,23 @@ func (s *Scheduler) periodicJitterFor(sweep bool) float64 {
 // 独立于 Run 的小时制排程：余额是分钟级观测量，不值得为它扩展 nextFire 的粒度。
 // 运行期可用 SetBalanceInterval 热改间隔（下一轮生效）。
 func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		return
+	if interval < 0 {
+		interval = 0
 	}
 	s.balanceInterval.Store(int64(interval))
+	// interval<=0 也要起 goroutine：启动时关闭、面板里再打开（SetBalanceInterval）时，
+	// 没有 goroutine 就没有任何接收者，poke 落空 → 界面显示「每 5 分钟」但永不刷新，
+	// creditsExpiring 与到期快照全冻结，「快过期积分优先」静默失效。
+	if !s.balanceStarted.CompareAndSwap(false, true) {
+		return
+	}
 	go func() {
 		// 启动即刷一轮：进程重启（含升级到带按日批次的版本）后旧 state 可能没有
 		// credits_expiry_buckets；不等第一个 ticker，首页快照就能拿到与「检查」
 		// 同口径的完整数据，避免升级后前 5 分钟仍显示旧口径。
-		s.RunBalanceRefreshNow()
+		if time.Duration(s.balanceInterval.Load()) > 0 {
+			s.RunBalanceRefreshNow()
+		}
 		var logged time.Duration
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
@@ -1000,14 +1013,20 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 // 事件上报）成本高；清扫只做 accept/claim 两条幂等读改请求，分钟级跑也几乎零
 // 负担，却能补上「达标的任务没人领奖」这条长期缺失的链路（issue #174）。
 func (s *Scheduler) StartTaskSweep(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		return
+	if interval < 0 {
+		interval = 0
 	}
 	s.sweepInterval.Store(int64(interval))
+	// 同 StartBalanceRefresh：关闭态也常驻 goroutine，热启用才有接收者。
+	if !s.sweepStarted.CompareAndSwap(false, true) {
+		return
+	}
 	go func() {
 		// 启动即跑一轮：升级/重启后立刻补领，不必等满一个间隔。清扫幂等
 		//（accept/claim 重复调用无副作用），首轮与后续 ticker 共用同一 hook。
-		s.runTaskSweepHook()
+		if time.Duration(s.sweepInterval.Load()) > 0 {
+			s.runTaskSweepHook()
+		}
 		var logged time.Duration
 		for {
 			cur := time.Duration(s.sweepInterval.Load())

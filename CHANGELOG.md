@@ -3,6 +3,32 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.24.8（2026-11-08）
+
+### 修复
+
+- **小额请求的积分扣减不再被四舍五入抹掉**：`NoteModelCost` 此前用 `int64(credit+0.5)`
+  逐笔取整，而真实请求的 `credit` 普遍小于 0.5（线上实测 0.06~0.34，只有长文/大请求才上 1），
+  于是每一笔都取整成 0——`credits`、`creditsExpiring`、按日到期批次**永不减少**，表现就是
+  「一直在跑请求，但面板上的过期积分不动」。改为余数累加：单笔先进 `creditFrac`，攒够 1 分
+  才落账，余数留到下次，跨请求、跨签到都不丢。100 分余额按 0.24/笔的节奏 5 笔后应为 99。
+  （选号侧没有缺陷：同一时段的请求日志显示 41/43 命中快过期窗口内的 4 个账号。）
+- **余额刷新「热启用」不再空转**：`StartBalanceRefresh` 在 `interval<=0` 时直接 return，
+  启动时若 `schedule.balance_refresh_enabled=false` 就不建 goroutine；之后在面板打开开关，
+  `SetBalanceInterval` 只写间隔值 + `poke(rearmBalance)`，而那个 channel 没有接收者——
+  界面如实显示「每 5 分钟后台刷新」，实际永远不刷新，`credits_expiring` 与到期快照冻结。
+  改为：关闭态也常驻 goroutine 等唤醒（`CompareAndSwap` 保证只起一次），`interval>0` 时才做
+  启动首刷。`StartTaskSweep` 同一处写法，一并修。
+- **零值时间戳不再渲染成「1065495620 分钟前」**：`balance_refreshed_at` 为 Go 零值
+  （`0001-01-01`）时，前端 `new Date()` 得到负数毫秒，算出的分钟数是个天文数字。加
+  `at > 0` 守卫：从未刷新过就不标注年龄。
+
+### 可观测
+
+- **「开了优先但没有快过期候选」限频告警**：`prefer_expiring` 开启却一个候选都匹配不到
+  （窗口为 0 / 刷新没跑 / 最早批次已过期）时，`pick` 每 30 分钟打一条 INFO，直接点明是
+  哪一类原因，不必再从面板数字反推。
+
 ## v1.24.7（2026-11-08）
 
 ### 修复
