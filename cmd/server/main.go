@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof" // WB2API_PPROF 打开时提供 /debug/pprof（默认无监听）
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -34,7 +35,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.24.6-panel"
+const appVersion = "1.24.7-panel"
 
 // insecureKeyWarning 空 api_key = 完全不鉴权（httpauth.VerifyBearer 对空 key 恒放
 // 行），样例占位符 test_key = 人尽皆知的弱密钥；叠加非回环监听（缺省 ":7863" 绑
@@ -421,6 +422,18 @@ func main() {
 	if cfg.Watchdog.Enabled {
 		go h.WatchCatalog(context.Background(), time.Duration(cfg.Watchdog.IntervalSeconds)*time.Second, nil)
 		log.Printf("watchdog: 上游模型目录监控已开启，每 %ds", cfg.Watchdog.IntervalSeconds)
+	}
+	// 诊断用：WB2API_PPROF=127.0.0.1:6060 时另起一个只跑 pprof 的监听。
+	// 默认不开启（不设环境变量就完全没有这个监听），供「并发一高就降速」这类只能靠
+	// 真实负载定位的 CPU 问题取 profile（取完即关容器，不常驻生产）。用独立
+	// http.Server + nil handler（= DefaultServeMux）：pprof 路由不会挂到网关入口上。
+	if addr := os.Getenv("WB2API_PPROF"); addr != "" {
+		go func() {
+			log.Printf("[pprof] 诊断监听开启 %s（CPU: /debug/pprof/profile?seconds=30）", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Printf("WARN: [pprof] 监听失败 %v", err)
+			}
+		}()
 	}
 	srv := &http.Server{
 		Addr:              cfg.Listen,

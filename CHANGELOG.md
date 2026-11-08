@@ -3,6 +3,46 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.24.7（2026-11-08）
+
+### 修复
+
+- **上游断流不再伪装成正常收尾**：上游既没给 `finish_reason`、也没发 `data: [DONE]` 就 EOF
+  （连接说到一半断了）时，网关此前只补一个 `[DONE]` 就当成功结束——客户端看到「内容 +
+  正常结束」但 `finish_reason` 为空，Agent 侧表现就是「说到一半停了、也不报错」，只能人工
+  接着催。现在流尾补一帧 `finish_reason=length`（`TruncationFinishReason`），由客户端自己
+  决定续写/重试；只在本层一个终态都没发过时补，正常收尾与「给了终态但漏发 `[DONE]`」的渠道
+  不受影响，空流仍走 `errEmptyStream` 原路径。
+- **输出预算下限，修掉「高档位思考把自己那份额度吃光」的截断**：客户端指定 high/max 档思考
+  又把 `max_tokens` 给得比该档思考还小时，上游把额度先花在思考上，正文只剩一半就断在句子
+  中间（上游生产实测 `high + 2048 → think=2048 正文=2048 finish=length`，而不给额度时同一
+  提示词正文 13722 token 正常收尾）。新增 `upstream/output_budget.go`：显式额度低于该档下限
+  时抬到下限（minimal/low 4096、medium 6144、high 8192、xhigh 12288、max 16384），目录
+  `maxOutputTokens` 更小时以目录封顶。抬的是**上限**不是目标长度，模型写完自然停；四种情形
+  一律不动：没给显式额度、探活级额度（<16）、`thinking.type=disabled` / `effort=off`、档位未知。
+  本库没有上游的 `continue.go` / `starved.go` 续写层，这一层是唯一防线。
+
+### 性能
+
+- **脱敏预检去掉 RE2 大小写折叠**：`hasFingerprint` 的兜底判据从
+  `sanitizeBareHdrRe.MatchString`（给每个字节跑一遍 `(?i)` 折叠状态机）改成单遍 ASCII 折叠
+  扫描 `containsFoldASCII`，字面量由正则表达式自身推导（`bareLiteralProbe`）——正则形态一旦
+  不再是纯字面量即自动回落到直接跑正则，避免手抄漂移与静默漏检。本机同一份 260KB 请求体实测：
+  `PrepareBodyOpt` 6.88ms → 3.03ms（-56%），`sanitizeMessages` 3.96ms → 0.45ms（-88%），
+  单条 6KB 文本的预检 94.8µs → 10.2µs。上游同源取证显示这一段占请求体预处理 CPU 的 56%，
+  是「并发一高就降速」的主因之一。
+
+### 可观测
+
+- **上游断流的归因不再被客户端断开污染**：`StreamHint` 新增 `WithClientGoneFn`，handler 传
+  `r.Context().Err() != nil`；客户端自己走掉（pkill / 关页面 / idle 掐线）时上游只是被动跟随，
+  不再记「上游未给终态就结束」WARN——错一次 pkill 就刷一条，会把真正的上游断流盖掉。终态照补，
+  静默只针对日志。
+- **`WB2API_PPROF` 诊断监听**：设成 `127.0.0.1:6060` 即另起一个只跑 pprof 的监听（默认不设
+  环境变量就完全没有这个监听），供「并发一高就降速」这类只能靠真实负载定位的 CPU 问题取
+  `/debug/pprof/profile?seconds=30`；用独立 `http.Server` + `DefaultServeMux`，pprof 路由不会
+  挂到网关入口上。
+
 ## v1.24.6（2026-11-07）
 
 ### 修复

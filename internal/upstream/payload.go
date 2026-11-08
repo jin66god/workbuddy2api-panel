@@ -92,6 +92,18 @@ func PrepareBodyOptWithRounds(src []byte, sanitize bool, efforts map[string][]st
 	modelName, _ := obj["model"].(string)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
 	normalizeReasoningEffort(obj, efforts)
+	// 输出预算下限（见 output_budget.go）：客户端既要高档位思考、又把 max_tokens 给得
+	// 比「这一档的思考都装不下」还小时，抬到该档下限。客户端不可能知道模型的思考要花
+	// 多少，这个组合错误只能由网关修；抬的是上限不是目标长度，模型写完照样停。
+	if effort := effectiveEffort(obj); effort != "" {
+		var modelCap int64
+		if modelName != "" {
+			if c, ok := MaxOutputTokensListing(modelName, 0); ok {
+				modelCap = c
+			}
+		}
+		ensureMinOutputBudget(obj, effort, modelCap)
+	}
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)

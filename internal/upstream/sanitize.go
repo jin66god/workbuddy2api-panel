@@ -37,6 +37,75 @@ var sanitizeHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?
 // 替换语义不同（整段删除 vs 最小缩写），不可合并为一个正则。
 var sanitizeBareHdrRe = regexp.MustCompile(`(?i)x-anthropic-billing-header`)
 
+// sanitizeBareHdrProbe 从 sanitizeBareHdrRe 的表达式推导出的裸字面量（小写形态）。
+//
+// 预检只需要回答「有没有这个词」，而这个正则只匹配一个字面量、不关心出现位置——用
+// RE2 的 (?i) 做这件事等于给每个字节跑一遍大小写折叠状态机。线上 profile（上游
+// 2026-11-08 取证）：这一段占请求体预处理 CPU 的 56%；本机 260KB body 实测
+// hasFingerprint 94.8µs/6KB vs 单遍 ASCII 折叠 6.8µs（14 倍）。
+//
+// 表达式形态一旦不再是「(?i)+纯字面量」（有人加了分组/字符类/量词），这里推出空串，
+// hasFingerprint 回落成直接跑正则——正确性优先，性能优化不得以漏检为代价。
+var sanitizeBareHdrProbe = bareLiteralProbe(sanitizeBareHdrRe.String())
+
+// bareLiteralProbe 把 `(?i)literal` / `(?i:literal)` 形态的表达式还原成字面量；
+// 含任何正则元字符或非小写字母数字时返回空串（=「不能走快路径」）。
+func bareLiteralProbe(expr string) string {
+	s := expr
+	switch {
+	case strings.HasPrefix(s, "(?i:"):
+		if !strings.HasSuffix(s, ")") {
+			return ""
+		}
+		s = s[4 : len(s)-1]
+	case strings.HasPrefix(s, "(?i)"):
+		s = s[4:]
+	default:
+		return ""
+	}
+	if s == "" {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return ""
+		}
+	}
+	return s
+}
+
+// containsFoldASCII 大小写不敏感的 ASCII 子串查找（单遍扫描 + 首字符快跳，零分配）。
+//
+// 只折叠 ASCII：与 RE2 的 (?i) 在本项目全部指纹字面量上的行为一致（字面量本身纯
+// ASCII，非 ASCII 字节不可能等于它们）。调用方必须保证 sub 全小写。
+func containsFoldASCII(s, sub string) bool {
+	n, m := len(s), len(sub)
+	if m == 0 || n < m {
+		return false
+	}
+	c0 := sub[0] | 0x20
+	for i := 0; i+m <= n; i++ {
+		if s[i]|0x20 != c0 {
+			continue
+		}
+		ok := true
+		for j := 1; j < m; j++ {
+			a, b := s[i+j], sub[j]
+			if a != b && a|0x20 != b|0x20 {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // sanitizeKvRe 剥离层：尾随裸键值（cc_xxx=...;）循环清理。
 var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 
@@ -177,15 +246,23 @@ func sanitizeTextWith(text string, identity bool) string {
 // hasFingerprint 特征预检：先走 strings.Contains 快速路径（零分配）；
 // header 键名有大小写变体（X-Anthropic-...）且可能以裸键名形态出现（无冒号），
 // Contains 大小写敏感、sanitizeHdrRe 要求冒号——两者都会漏掉「混合大小写 + 裸键名」，
-// 必须再用不要求冒号的 (?i) 正则兜底（sanitizeBareHdrRe），否则整条净化被跳过。
+// 必须再兜一层不要求冒号的检测（sanitizeBareHdrRe），否则整条净化被跳过。
 // sanitizeBareHdrRe 不要求冒号，是 sanitizeHdrRe 的超集，故无需再单独匹配后者。
+//
+// 兜底检测用 containsFoldASCII 而不是 sanitizeBareHdrRe.MatchString：判据完全等价
+// （该正则只匹配这一个字面量、只关心是否存在），但 RE2 的大小写折叠是整条净化链上
+// 最贵的一步——它给每个 message 的每个字节都跑一遍状态机，长上下文里就是主要成本。
 func hasFingerprint(text string) bool {
 	for _, f := range sanitizeFeatures {
 		if strings.Contains(text, f) {
 			return true
 		}
 	}
-	return sanitizeBareHdrRe.MatchString(text)
+	if sanitizeBareHdrProbe == "" {
+		// 正则形状变了（不再是纯 (?i) 字面量）：回落成直接跑正则，正确性优先。
+		return sanitizeBareHdrRe.MatchString(text)
+	}
+	return containsFoldASCII(text, sanitizeBareHdrProbe)
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。

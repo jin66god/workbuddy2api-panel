@@ -1394,7 +1394,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }),
-				upstream.WithMarkupRepair(repair))
+				upstream.WithMarkupRepair(repair),
+				// 客户端自己断开时上游只是被动跟随，别把断流记成上游故障（日志归因）：
+				// 这条 WARN 会顶掉真正的上游断流，让「错误汇总」失去信噪比。
+				upstream.WithClientGoneFn(func() bool { return r.Context().Err() != nil }))
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]

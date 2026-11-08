@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -23,6 +24,11 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // 在流式路径把空流记为失败观测（HTTP 头已发出只能 200，但日志/状态应收敛到
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
+
+// TruncationFinishReason 上游断流时补写的终态。取 "length" 而不是 "stop"：
+// 客户端看到 length 才会知道「这条回答被截断了」（是否续写/重试由客户端决定），
+// 而 "stop" 等于把断流伪装成正常收尾——Agent 侧表现就是「说到一半停了、也不报错」。
+const TruncationFinishReason = "length"
 
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
@@ -485,6 +491,17 @@ type StreamOption func(*streamOptions)
 type streamOptions struct {
 	onErrorFrame func(payload string)
 	markup       *MarkupRepair
+	// clientGone 客户端是否已经断开（handler 传 r.Context().Err() != nil）。
+	// 只用于**日志归因**：客户端自己走了（pkill / 关页面 / idle 掐线），上游只是
+	// 被动跟随断连，那条「上游未给终态就结束」的 WARN 就不该记——线上实测 pkill
+	// 一次就刷一条，噪音会盖掉真正的上游断流。
+	clientGone func() bool
+}
+
+// WithClientGoneFn 注入「客户端是否已断开」的判定（可为 nil：nil 时一律按
+// 「客户端还在等」处理，与未引入该开关前的行为一致）。
+func WithClientGoneFn(fn func() bool) StreamOption {
+	return func(o *streamOptions) { o.clientGone = fn }
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -542,6 +559,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	repair := o.markup
 	synthIdx := 0
 	maxToolIdx := -1
+	// finishSeen 本层是否已向客户端写出过任何 finish_reason（任何取值）。
+	// 与 upstreamDone（上游是否发过 data: [DONE]）合起来判「这段流是不是被截断」：
+	// 两者都没有 = 上游连接说到一半断了，既没正常收尾也没给终态。
+	finishSeen := false
 	toolFinishSent := false
 
 	// writeSSE 原样写出一帧并 flush。
@@ -572,6 +593,17 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// 已用过的最大 tool_call index（供标记修复接续编号）。
 	// fallback 是规范化失败时的兜底原文（与修复前「marshal 失败即原样透传」一致）。
 	writeChunk := func(obj map[string]any, fallback string) error {
+		// 记「已发过终态」：任何非空 finish_reason 都算（length/stop/tool_calls）。
+		// 流尾据此判断流——上游给了终态就不是断流，哪怕它没发 [DONE]。
+		if chs, ok := obj["choices"].([]any); ok {
+			for _, ci := range chs {
+				if c, ok := ci.(map[string]any); ok {
+					if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+						finishSeen = true
+					}
+				}
+			}
+		}
 		// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
 		stripToolCallNames(obj, toolCallSeen)
 		// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，
@@ -709,6 +741,8 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	br := bufio.NewReaderSize(r, 64*1024)
 	validFrames := 0
+	// upstreamDone 上游是否显式发过 data: [DONE]（正常收尾信号）。
+	upstreamDone := false
 readLoop:
 	for {
 		line, err := br.ReadString('\n')
@@ -717,6 +751,7 @@ readLoop:
 		case strings.HasPrefix(trimmed, "data: [DONE]"):
 			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
 			// [DONE] 统一在循环结束后写出，保证恰好一个。
+			upstreamDone = true
 			break readLoop
 		case strings.HasPrefix(trimmed, "data: "):
 			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
@@ -770,6 +805,24 @@ readLoop:
 			if werr := writeChunk(finishOnlyFrame(map[string]any{}, "tool_calls"), ""); werr != nil {
 				return werr
 			}
+		}
+	}
+	// 截断兜底：上游既没给 finish_reason，也没发 data: [DONE] 就 EOF —— 这是上游连接
+	// 说到一半断了，不是正常收尾。此前这种流只会补一个 [DONE]：客户端看到「内容 + 正常
+	// 结束」但 finish_reason 为空，Agent 侧的表现就是「说到一半停了、也不报错」，只能
+	// 人工接着催。这里补一帧截断终态（finish_reason=length），由客户端自己决定续写/重试
+	// ——网关不再把断流伪装成成功。
+	//
+	// 只在本层一个终态都没发过时补：补两帧会让后一个洗掉前一个（最典型是标记修复刚补
+	// 的 tool_calls 被覆盖）。放在标记修复收尾之后，等 toolFinishSent 落定再判。
+	if !upstreamDone && !finishSeen && !toolFinishSent && validFrames > 0 {
+		// 客户端自己断开时上游只是被动跟随断连，这条不是上游故障——记 WARN 会把真正的
+		// 上游断流盖掉（错误按类别聚合，噪音会挤掉信噪比）。归因交给 handler 的 499 观测。
+		if o.clientGone == nil || !o.clientGone() {
+			log.Printf("WARN: [server] stream 上游未给终态就结束（无 finish_reason、无 data: [DONE]，%d 个有效帧）→ 按截断收尾", validFrames)
+		}
+		if werr := writeChunk(finishOnlyFrame(map[string]any{}, TruncationFinishReason), ""); werr != nil {
+			return werr
 		}
 	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），
