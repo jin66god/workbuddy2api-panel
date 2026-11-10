@@ -1,12 +1,15 @@
 package panel
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -66,13 +69,28 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var accounts []cockpitAccount
-	if err := json.Unmarshal(raw, &accounts); err != nil {
+	// 形态归一：批量导出是「顶层数组 + snake_case」，单账号详情导出是嵌套驼峰
+	// {account,auth}，还有信封与 {"<uid>":{…}} 字典形态。用户不会区分这些，统一在
+	// 解码处归一，而不是让人手工改写。
+	accounts, err := decodeCockpitAccounts(raw)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 	if len(accounts) == 0 {
 		writeErr(w, http.StatusBadRequest, "empty accounts array")
+		return
+	}
+
+	// 凭证目录必须在第一次落盘前就位。login.go / apikey.go 各自在写盘前建了目录，
+	// 唯独本文件漏了：全新部署（auths/ 还没生成、也没登录过任何账号）时，写盘用的
+	// 临时文件创建直接 ENOENT，用户看到的是「导入失败」，而服务本身完全正常
+	// ——LoadDir 用 filepath.Glob，目录不存在时返回空列表且不报错，所以启动日志
+	// 一切正常（loaded 0 account(s)），问题只在导入时暴露。
+	// 放在循环外建一次：目录是进程级前置条件，逐个账号重复 MkdirAll 既无意义，
+	// 也会在部分账号失败时给出误导性错误。
+	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
+		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
 		return
 	}
 
@@ -100,8 +118,9 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		// 按 domain 推断 realm：workbuddy.ai 家族 → global，否则 cn。
 		realm := auth.ResolveRealm("", acc.Domain)
 
-		// cockpit tools 的 expires_at 为毫秒时间戳，转为秒。
-		expiresAt := acc.ExpiresAt / 1000
+		// expires_at 先统一成毫秒再转秒：批量导出是毫秒，单账号详情导出是秒，直接
+		// 除以 1000 会把秒级值算成 1970 年（账号一进池就是「已过期」）。
+		expiresAt := normalizeExpiresAtMillis(acc.ExpiresAt) / 1000
 		if expiresAt <= 0 {
 			expiresAt = time.Now().Add(365 * 24 * time.Hour).Unix()
 		}
@@ -200,4 +219,217 @@ func validImportUID(uid string) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// 导入格式归一化
+// ---------------------------------------------------------------------------
+
+// nestedCockpit 是 cockpit tools「账号详情」导出的嵌套形态：
+//
+//	{"account":{"uid":"…","nickname":"…"},"auth":{"accessToken":"…","refreshToken":"…"}}
+//
+// 同一个导出工具会产出两种形态：批量导出是「顶层数组 + snake_case」，单账号详情
+// 导出是上面这种嵌套驼峰。用户不会区分，故在解码处统一，而不是让人手工改写。
+type nestedCockpit struct {
+	Account struct {
+		UID           string `json:"uid"`
+		Nickname      string `json:"nickname"`
+		EnterpriseID  string `json:"enterpriseId"`
+		EnterpriseID2 string `json:"enterprise_id"`
+	} `json:"account"`
+	Auth struct {
+		AccessToken   string `json:"accessToken"`
+		AccessToken2  string `json:"access_token"`
+		RefreshToken  string `json:"refreshToken"`
+		RefreshToken2 string `json:"refresh_token"`
+		Domain        string `json:"domain"`
+		ExpiresAt     int64  `json:"expiresAt"`
+		ExpiresAt2    int64  `json:"expires_at"`
+	} `json:"auth"`
+}
+
+// decodeCockpitAccounts 把导入 JSON 归一成账号列表。接受：
+//   - 顶层数组（批量导出）
+//   - 单个扁平对象（蛇形或驼峰）
+//   - 单个嵌套对象 {account,auth}（账号详情导出）
+//   - 信封 {accounts|data|list|items|results|auths: [...]}
+//   - 字典 {"<uid>": {...}}（键即 uid）
+//
+// 认不出的结构才返回 error（调用方转 400）；认得出但缺字段的条目照旧进主循环
+// 记 skipped——错误信息里要能说出是哪一条，不能被解码层吞掉。
+func decodeCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty body")
+	}
+	switch trimmed[0] {
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, err
+		}
+		return decodeCockpitItems(items), nil
+	case '{':
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &obj); err != nil {
+			return nil, err
+		}
+		for _, k := range []string{"accounts", "data", "list", "items", "results", "auths"} {
+			sub, ok := obj[k]
+			if !ok {
+				continue
+			}
+			var items []json.RawMessage
+			if err := json.Unmarshal(sub, &items); err == nil {
+				return decodeCockpitItems(items), nil
+			}
+			// 信封的值是**单个账号对象**（用户把单账号详情又包了一层）：
+			// 按条目解，但绝不能拿信封键当 uid——见字典分支的说明。
+			if acc, ok := decodeCockpitOne(sub); ok {
+				return []cockpitAccount{acc}, nil
+			}
+		}
+		if _, ok := obj["account"]; ok {
+			return decodeCockpitItems([]json.RawMessage{trimmed}), nil
+		}
+		if _, ok := obj["auth"]; ok {
+			return decodeCockpitItems([]json.RawMessage{trimmed}), nil
+		}
+		if acc, ok := decodeCockpitOne(trimmed); ok {
+			return []cockpitAccount{acc}, nil
+		}
+		// 字典：{"<uid>": {...}}，键当 uid 兜底
+		//
+		// 信封名不能当 uid：`{"accounts":{"refresh_token":"r"}}` 是「信封的值是单个
+		// 对象」形态，走到这里时 accounts 这个键会命中内层（有 token），兜底就会把
+		// 账号的 uid 写成字面量 "accounts"——池里从此多一个格式合法、内容垃圾的号。
+		// 信封名本身不是 uid（真实 uid 是手机号/UUID），直接跳过。
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			if isCockpitEnvelopeKey(k) {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // 稳定顺序，便于前端展示与测试比对
+		out := make([]cockpitAccount, 0, len(keys))
+		for _, k := range keys {
+			acc, ok := decodeCockpitOne(obj[k])
+			if !ok {
+				continue
+			}
+			if strings.TrimSpace(acc.UID) == "" {
+				acc.UID = k
+			}
+			out = append(out, acc)
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("无法识别的 JSON 结构：既不是账号数组，也不是 {account,auth} 或 {\"<uid>\":{…}}")
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("expected JSON array or object")
+	}
+}
+
+// isCockpitEnvelopeKey 报告键名是否是导出工具的信封名（不是 uid）。
+func isCockpitEnvelopeKey(k string) bool {
+	for _, e := range []string{"accounts", "data", "list", "items", "results", "auths"} {
+		if strings.EqualFold(strings.TrimSpace(k), e) {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeCockpitItems 逐条解码；认不出的条目保留一个空占位，
+// 让主循环按「missing required fields」记账，而不是从结果里凭空消失。
+func decodeCockpitItems(items []json.RawMessage) []cockpitAccount {
+	out := make([]cockpitAccount, 0, len(items))
+	for _, it := range items {
+		if acc, ok := decodeCockpitOne(it); ok {
+			out = append(out, acc)
+			continue
+		}
+		out = append(out, cockpitAccount{})
+	}
+	return out
+}
+
+// decodeCockpitOne 依次尝试：蛇形扁平 → 驼峰扁平 → {account,auth} 嵌套。
+// 判据统一是「拿到至少一个 token」：cockpitAccount 的 tag 是蛇形，直接
+// Unmarshal 一个驼峰对象会成功但字段全空，不检查就会把有效账号当成空账号。
+func decodeCockpitOne(raw json.RawMessage) (cockpitAccount, bool) {
+	var a cockpitAccount
+	if err := json.Unmarshal(raw, &a); err == nil && (a.AccessToken != "" || a.RefreshToken != "") {
+		return a, true
+	}
+	var f struct {
+		UID          string `json:"uid"`
+		Nickname     string `json:"nickname"`
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    int64  `json:"expiresAt"`
+		Domain       string `json:"domain"`
+		EnterpriseID string `json:"enterpriseId"`
+	}
+	if err := json.Unmarshal(raw, &f); err == nil && (f.AccessToken != "" || f.RefreshToken != "") {
+		a.UID = f.UID
+		a.Nickname = f.Nickname
+		a.AccessToken = f.AccessToken
+		a.RefreshToken = f.RefreshToken
+		a.ExpiresAt = f.ExpiresAt
+		a.Domain = f.Domain
+		a.EnterpriseIDCamel = f.EnterpriseID
+		return a, true
+	}
+	var n nestedCockpit
+	if err := json.Unmarshal(raw, &n); err == nil {
+		at := firstNonEmpty(n.Auth.AccessToken, n.Auth.AccessToken2)
+		rt := firstNonEmpty(n.Auth.RefreshToken, n.Auth.RefreshToken2)
+		if at != "" || rt != "" {
+			return cockpitAccount{
+				UID:               n.Account.UID,
+				Nickname:          n.Account.Nickname,
+				EnterpriseIDCamel: firstNonEmpty(n.Account.EnterpriseID, n.Account.EnterpriseID2),
+				AccessToken:       at,
+				RefreshToken:      rt,
+				Domain:            n.Auth.Domain,
+				ExpiresAt:         firstNonZero(n.Auth.ExpiresAt, n.Auth.ExpiresAt2),
+			}, true
+		}
+	}
+	return a, false
+}
+
+func firstNonEmpty(v ...string) string {
+	for _, s := range v {
+		if strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+func firstNonZero(v ...int64) int64 {
+	for _, n := range v {
+		if n != 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// normalizeExpiresAtMillis 把 expires_at 统一成毫秒。
+// 批量导出是毫秒（≈1.7e12），单账号详情导出是秒（≈1.7e9）。
+// 以 1e11 分界：秒制要走 3000 年才到这个数，毫秒制的历史值也远大于它。
+func normalizeExpiresAtMillis(v int64) int64 {
+	if v <= 0 {
+		return 0
+	}
+	if v < 1e11 {
+		return v * 1000
+	}
+	return v
 }
