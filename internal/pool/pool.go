@@ -85,6 +85,9 @@ type Pool struct {
 	strategies   RegionStrategies
 	accountOrder RegionAccountOrder
 	scheduling   map[string]scheduleCursor
+	// egress 出口级瞬时失败计数（egress.go）：键 = "direct:" + realm。运行态，不持久化。
+	// 传输层失败发生在上游看到账号之前，归因应落在共用出口上而不是被选中的号上。
+	egress map[string]egressStat
 	// stopCh 关闭信号：Close 关闭它使 startFlusher 的后台 goroutine 退出。
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
 	stopCh chan struct{}

@@ -135,9 +135,19 @@ func (h *Handler) runSearch(ctx context.Context, query string, maxResults int, m
 				h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, "", ue)
 			}
 		} else {
-			// 传输层故障（非上游业务返回）：只喂连败计数，不按业务错误罚。
-			h.cfg.Pool.NoteFailures(acct.UID)
+			// 传输层故障（非上游业务返回）：归因到**出口**（egress.go），不记到号上。
+			// 与 chat 路径同一口径：拨号/TLS 失败发生在上游看到这个号之前，一次链路
+			// 抖动会顺着轮转给被选中的号逐个记连败，几轮就把整池喂到降权阈值——而
+			// 链路只断了几秒。同出口共用秒级阶梯，达阈直接放弃轮转。
+			streak := h.cfg.Pool.NoteEgressFailure(egressKey(acct), time.Now())
 			lastStatus = http.StatusServiceUnavailable
+			if streak >= egressGiveUpStreak {
+				break
+			}
+			if !sleepCtx(ctx, egressBackoff(streak, egressBackoffBase)) {
+				break
+			}
+			continue
 		}
 		if !rotateBackoff(i, ctx) {
 			break

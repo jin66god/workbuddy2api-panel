@@ -404,3 +404,28 @@ func TestLookupForModelOnlyReusesValidBinding(t *testing.T) {
 		t.Fatal("lookup allocated a replacement")
 	}
 }
+
+// TestDeriveCacheKeyIgnoresUserIDGate 只发 user_id 的客户端在 ExtractKey 里被
+// anti-monopoly 闸成空串（避免 user 维度粘性），但 DeriveCacheKey 必须仍能按对话
+// 内容给出稳定键：否则这类客户端每轮换号、上游前缀缓存全量 miss。
+func TestDeriveCacheKeyIgnoresUserIDGate(t *testing.T) {
+	body := []byte(`{"model":"glm-5.2","metadata":{"user_id":"u-123"},"messages":[{"role":"system","content":"sys"},{"role":"user","content":"第一轮"}]}`)
+	if got := ExtractKey(body); got != "" {
+		t.Fatalf("ExtractKey(user_id-only) = %q, want empty（anti-monopoly 闸）", got)
+	}
+	k1 := DeriveCacheKey(body)
+	if k1 == "" {
+		t.Fatal("DeriveCacheKey(user_id-only) 不能为空：否则账号每轮轮换、前缀缓存全 miss")
+	}
+	if k2 := DeriveCacheKey(body); k2 != k1 {
+		t.Fatalf("同一对话两次派生键不一致：%q vs %q", k1, k2)
+	}
+	// 同一 user 的并行对话（首条 user 不同）必须拿到不同键，否则复活 user 维度粘性。
+	other := []byte(`{"model":"glm-5.2","metadata":{"user_id":"u-123"},"messages":[{"role":"system","content":"sys"},{"role":"user","content":"另一个对话"}]}`)
+	if k3 := DeriveCacheKey(other); k3 == k1 {
+		t.Fatal("同一 user 的不同对话派生出同一键：恢复成了 user 维度粘性")
+	}
+	if DeriveCacheKey([]byte(`{"model":"x"}`)) != "" {
+		t.Fatal("无 messages 时应返回空串（安全降级）")
+	}
+}

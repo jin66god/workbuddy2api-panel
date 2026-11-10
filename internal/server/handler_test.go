@@ -28,6 +28,9 @@ import (
 // 断言表格行输出的测试（logging_test.go 中的 ChatLogs/LogChatRow 系列）用 withChatLog 临时开启。
 func TestMain(m *testing.M) {
 	chatLogEnabled = false
+	// 出口级退避默认 1s 起：真实等待会让传输层失败用例每次多睡 1-7 秒。
+	// 置 0 后 egressBackoff 恒 0（与 rotateBackoffBase=0 的测试口径一致）。
+	egressBackoffBase = 0
 	os.Exit(m.Run())
 }
 

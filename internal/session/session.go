@@ -464,6 +464,28 @@ func deriveKey(obj map[string]any) string {
 	return derivedKeyPrefix + hex.EncodeToString(sum[:16])
 }
 
+// DeriveCacheKey 忽略 user_id 闸，强制按对话内容派生键（system + 首条 user 的哈希）。
+//
+// 与 deriveKey 的唯一区别是不受 anti-monopoly 闸约束。用途：只发 metadata.user_id
+// 的客户端在 ExtractKey 里被闸成空串（避免 user 维度粘性 → 一个 user 的全部并行
+// 对话钉死同一账号），代价是账号每轮被轮换——而上游前缀缓存按账号隔离（cache_key
+// 掺 uid），换号就是全量 miss（实测同一份 3.6k body 连发两次：带 conversation_id
+// 第二轮命中 95.1%，只带 user_id 两轮都 3634/3634 miss）。
+//
+// 派生键是**对话级**而非用户级：同一用户的并行对话首条 user 不同 → 键不同 → 照旧
+// 分散，原契约想避免的「一个 user 全钉同一号」不会发生。取不到用户文本时返回空串
+// （纯图片轮等），调用方按无键处理。
+func DeriveCacheKey(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	return deriveKey(obj)
+}
+
 // userContentSignature 把已解析的 content（any）转回 RawMessage 后取**会话级稳定**
 // 签名，供 deriveKey（粘性键）专用。与 TurnKey 的 contentSignature（全文摘）不同：
 // 文本 part 照常拼接；非文本 part 只入 "[type]" 占位**不入内容摘要**——同一逻辑

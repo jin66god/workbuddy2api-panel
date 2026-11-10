@@ -747,15 +747,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
+	// bindKey 账号绑定与缓存槽实际使用的键：sessKey 为空时用内容派生键。
+	//
+	// 只发 metadata.user_id 的客户端被 ExtractKey 的 anti-monopoly 闸判成无会话键
+	// （见 session.ExtractKey 注释），此前既不绑定账号、convID 也为空 → 每轮被轮换
+	// 到新号 + 上游 cache_key 退化成每账号一个常量槽，两轮全量 miss。派生键是
+	// system+首条 user 的哈希，天然是对话级——同一用户的并行对话首条 user 不同则键
+	// 不同，照旧分散，不会复活 user 维度粘性。
+	bindKey := sessKey
+	if bindKey == "" {
+		bindKey = session.DeriveCacheKey(body)
+	}
 	stickyUID := ""
-	if h.cfg.Session != nil && sessKey != "" {
+	if h.cfg.Session != nil && bindKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
 		resolve := h.cfg.Session.ResolveForModel
 		if h.cfg.Pool.StrategyForRealm(realm) != pool.WeightedRandom {
 			resolve = h.cfg.Session.LookupForModel
 		}
-		if uid, ok := resolve(sessKey, peek.Model); ok {
+		if uid, ok := resolve(bindKey, peek.Model); ok {
 			stickyUID = uid
 		}
 	}
@@ -789,7 +800,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
 		if stickyUID != "" {
-			h.cfg.Session.Unbind(sessKey)
+			h.cfg.Session.Unbind(bindKey)
 			stickyUID = ""
 		}
 	}
@@ -927,20 +938,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// prefix-cache slot.
 	convID := session.ResolveConversationID(body)
 	if convID == "" {
-		convID = sessKey
+		// 客户端没给对话 id 时用 bindKey：sessKey 为空（只发 user_id / 完全无标识）
+		// 的客户端也要有一个**对话级**稳定键，否则 prompt_cache_key 退化成每账号
+		// 一个常量槽，所有会话在同一槽里互相驱逐。bindKey 为内容派生键，对话级。
+		convID = bindKey
 	}
 	chatMeta := upstream.ChatMeta{ConversationID: convID}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
-	} else if turnKey != "" && sessKey != "" {
-		// 轮级复合键：sessKey 入键防跨会话同轮文本互撞（#170 统一轮级）。
-		chatMeta.ConversationRequestID = session.TurnRequestID(sessKey + ":" + turnKey)
+	} else if turnKey != "" && bindKey != "" {
+		// 轮级复合键：bindKey 入键防跨会话同轮文本互撞（#170 统一轮级）。
+		// 用 bindKey 而非 sessKey：只发 user_id 的客户端 sessKey 为空，此前落到
+		// 下一分支生成纯 turnKey 键——同会话每轮换键，会话头族聚合随之断裂。
+		chatMeta.ConversationRequestID = session.TurnRequestID(bindKey + ":" + turnKey)
 	} else if turnKey != "" {
 		// 无会话键客户端：纯轮级键（既有兜底语义不变，存量会话键值零漂移）。
 		chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
-	} else if sessKey != "" {
+	} else if bindKey != "" {
 		// 残留空态兜底（无 user 消息/无可签名内容）：会话级聚合，好于请求级随机。
-		chatMeta.ConversationRequestID = session.RequestIDForKey(sessKey)
+		chatMeta.ConversationRequestID = session.RequestIDForKey(bindKey)
 	} else {
 		// 无会话键也无轮级键：请求级随机（轮转内捕获一次即共享）。
 		chatMeta.ConversationRequestID = session.TurnRequestID("")
@@ -1126,17 +1142,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					logfmt.Label(acct.UID, acct.Nickname), terr)
 				break
 			}
-			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
-			// 连败兜底（issue #114）：喂连败计数——连不上上游是「不知道原因的失败」，
-			// 连败 N 次临时出池，单次/偶发不罚（NoteFailures 内部达阈才动作）。
-			// 上游 client 已打 transport error 日志。
+			// 网络层抖动：归因到**出口**，不记到号上（egress.go）。
+			//
+			// 走到这里的传输层失败只可能来自直连路径（本库没有代理池，所有账号共用
+			// 同一个上游域名出口）。拨号/TLS 失败发生在上游看到这个号之前，不携带任何
+			// 「这个号坏了」的证据；此前无条件 NoteFailures(acct.UID)，一次链路抖动会
+			// 顺着轮转给被选中的号逐个记连败（MaxRotate=3 就是 3 个号），几轮请求就把
+			// 整池喂到 degradeThreshold 临时出池，而链路只断了几秒。
+			//
+			// 改为记出口：同域账号共用一个秒级阶梯（1s 起、翻倍、封顶 15s），换号换不到
+			// 别的链路，所以连续失败到 egressGiveUpStreak 直接 503，不再空转轮转。
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			h.cfg.Pool.NoteFailures(acct.UID)
+			streak := h.cfg.Pool.NoteEgressFailure(egressKey(acct), time.Now())
 			fail(acct.UID)
-			if !rotateBackoff(i, r.Context()) {
-				break // ctx 取消：终止轮转（传输层错误换号退避）
+			if streak >= egressGiveUpStreak {
+				// 链路连续失败：换号只是把同样的等待与失败重复一遍（换不到别的链路），
+				// 快速失败让客户端按自己的节奏重试。
+				break
+			}
+			if !sleepCtx(r.Context(), egressBackoff(streak, egressBackoffBase)) {
+				break // ctx 取消：终止轮转（传输层错误换路退避）
 			}
 			continue
 		}
@@ -1244,6 +1271,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
 					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
+			// 11151 空 text 段：与上面三条同一哲学——出站前已补位，走到这里是兜底，
+			// 同一 body 换任何账号都会被同一处拒绝。立即透传上游原文回 400。
+			if kind == upstream.ErrEmptyContent {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "a message in the request history has empty content"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "empty_content", msg,
+					h.hintOf(upstream.ErrEmptyContent, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
 				return
@@ -1427,8 +1469,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.phase = phaseStreaming // 上游帧已开始透传，客户端中途离开
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-				if sessKey != "" && h.cfg.Session != nil {
-					h.cfg.Session.Bind(sessKey, acct.UID)
+				if bindKey != "" && h.cfg.Session != nil {
+					h.cfg.Session.Bind(bindKey, acct.UID)
 				}
 			default:
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
@@ -1439,8 +1481,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-				if sessKey != "" && h.cfg.Session != nil {
-					h.cfg.Session.Bind(sessKey, acct.UID)
+				if bindKey != "" && h.cfg.Session != nil {
+					h.cfg.Session.Bind(bindKey, acct.UID)
 				}
 			}
 			credit, hasCredit := stats.Credit()
@@ -1547,8 +1589,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if sessKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(sessKey, acct.UID)
+		if bindKey != "" && h.cfg.Session != nil {
+			h.cfg.Session.Bind(bindKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if hasCredit {
@@ -1760,6 +1802,19 @@ func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) 
 		return 0, 0, false
 	}
 	return c, int(t), true
+}
+
+// egressKey 这次传输层失败该记到哪个出口上。
+//
+// 键 = "direct:" + 域：cn 与 global 是不同的上游域名与网络环境，共用一条阶梯会让一个
+// 域的抖动压住另一个域刚恢复的那几秒。本库没有代理池，出口身份只能到域这一级；将来
+// 若接入代理，应把节点 ID 拼进键（而不是在账号上猜）。
+func egressKey(a *auth.Auth) string {
+	realm := "cn"
+	if a != nil && a.Realm() != "" {
+		realm = a.Realm()
+	}
+	return "direct:" + realm
 }
 
 // rotateBackoff 轮转间指数退避 + 抖动（WAF 403 修复 P0-2）：第 i 次轮转失败
@@ -2008,6 +2063,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrImageInvalid:
 		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
+	case upstream.ErrEmptyContent:
+		// 11151 空 text 段：请求内容的问题（历史里某个 text 段是空串/缺失），同一 body
+		// 换任何账号都是同样的拒绝。零动作（不冷却/不熔断/不 NoteError/不喂连败）；
+		// 出站前 empty_text_part.go 已补位，走到这里说明补位没覆盖该形态，
+		// chatCompletions 已 fail-fast 400 透传原文、终止轮转。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换了账号照样 400，
