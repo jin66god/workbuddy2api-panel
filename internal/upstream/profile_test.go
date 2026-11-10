@@ -48,3 +48,39 @@ func TestFetchAccountProfileBusinessError(t *testing.T) {
 		t.Fatal("401 应返回错误")
 	}
 }
+
+// TestFetchAccountProfileFlatShape 顶层平铺形态 {uid,nickname}（无 code/data 信封）。
+// 实测该接口两种形态都出现过；信封解析后 Data 为空时必须回落到原始响应体，否则
+// 平铺响应会被当成「空对象」→ 昵称恒空 → 整批刷新零更新且零日志。
+func TestFetchAccountProfileFlatShape(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"uid":"u1","nickname":"平铺名字","phoneNumber":"13800000000"}`), nil
+	})
+	c.WebBaseCN = "https://web.example"
+	nick, err := c.FetchAccountProfile(&auth.Auth{UID: "u1", AccessToken: "at"})
+	if err != nil || nick != "平铺名字" {
+		t.Fatalf("nick=%q err=%v, want 平铺名字 nil", nick, err)
+	}
+}
+
+// TestFetchAccountProfileEmptyNickname 空/空白/缺失昵称必须按失败返回。
+// 否则调用方 SetNickname("") 返回 false：既不算更新也不算失败，整批拿不到昵称时
+// 日志一行都不打（看起来像什么都没发生）。
+func TestFetchAccountProfileEmptyNickname(t *testing.T) {
+	cases := []string{
+		`{"code":0,"data":{"uid":"u1","nickname":""}}`,
+		`{"code":0,"data":{"uid":"u1","nickname":"   "}}`,
+		`{"code":0,"data":{"uid":"u1"}}`,
+		`{"uid":"u1","nickname":null}`,
+	}
+	for _, body := range cases {
+		c := testClient(func(r *http.Request) (*http.Response, error) {
+			return jsonResp(200, body), nil
+		})
+		c.WebBaseCN = "https://web.example"
+		nick, err := c.FetchAccountProfile(&auth.Auth{UID: "u1", AccessToken: "at"})
+		if err == nil {
+			t.Fatalf("body=%s: 空昵称应报错，实际 nick=%q", body, nick)
+		}
+	}
+}

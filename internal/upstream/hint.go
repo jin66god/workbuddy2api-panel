@@ -47,6 +47,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "request context exceeds the model's limit; reduce history/message size"
 	case ErrImageInvalid:
 		return "image request was rejected by upstream; check image_url format and image data"
+	case ErrEmptyContent:
+		// 11151 空段：上游对「某条消息的 text 段是空串」判硬 400。出站前网关已补位，
+		// 客户端能做的是把那条空消息删掉或换新会话——重试必然复现。
+		return "request history contains an empty text block; upstream rejects it as-is — drop that message or start a new conversation"
 	case ErrWafBlock:
 		// 账号级 WAF 403 与 IP 级 fail-fast 同 hint：两者对客户端的动作一致
 		// （等待窗口过去再试，换号/立刻重试无意义）。

@@ -48,6 +48,7 @@ const (
 	ErrUpstreamBusy                  // 6020「queue.waiting.title」/ 6021「queue.full.title」渠道级排队/队列满（非账号问题）→ 不罚号、不轮转，末端 503 + upstream_busy
 	ErrModelBusy                     // 14003「Model busy」模型后端间歇繁忙 → 只停(账号×模型)短窗口，不罚账号、照常换号
 	ErrGatewayDown                   // Cloudflare 520/522/524 等「边缘→源站」故障 → 零惩罚、不轮转，末端 503
+	ErrEmptyContent                  // 11151「a message has empty content」→ 请求内容级空 text 段（出站已补位，这里是兜底）：不罚号、不轮转，末端 400 透传原文
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -83,6 +84,8 @@ func (k ErrKind) String() string {
 		return "model_busy"
 	case ErrGatewayDown:
 		return "gateway_down"
+	case ErrEmptyContent:
+		return "empty_content"
 	case ErrAccountFault:
 		return "account_fault"
 	case ErrChannelRefused:
@@ -792,6 +795,14 @@ func Classify(status int, body string) ErrKind {
 			}
 		}
 	}
+	// 11151「a message has empty content」：空 text 段被上游判为硬 400。出站前
+	// empty_text_part.go 已经补位（含「字符串被当 parts 嗅探」那种），到这里说明补位
+	// 没覆盖该形态，但它是**同一请求的错**：换任何账号都会被同一处拒绝，轮转只会白打
+	// 整池并喂连败。只认结构化 code——文案 "empty content" 可能出现在用户自己的消息
+	// 里，按词判会把正常请求误分类成「不再轮转」。
+	if status == http.StatusBadRequest && hasBusinessCode(body, "11151") {
+		return ErrEmptyContent
+	}
 	if status == http.StatusNotFound {
 		return ErrNotFound
 	}
@@ -1201,6 +1212,18 @@ func applyConnectionHeader(req *http.Request) {
 }
 
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
+	env, _, err := c.doJSONRaw(req)
+	return env.Data, err
+}
+
+// doJSONRaw 同 doJSON，另外把**原始响应体**一并返回。
+//
+// 为什么需要：多数接口是 {code,msg,data} 信封，doJSON 只交 data 就够了；但账号
+// 资料接口 /console/account 在实际环境里出现过两种形态（顶层平铺 uid/nickname 与
+// {code:0,data:{...}} 包装）。平铺形态没有 code 字段，信封解析后 Code=0、Data 为空，
+// 只看 data 会得到一个空对象——调用方必须能拿到原文自己判形态。
+func (c *Client) doJSONRaw(req *http.Request) (apiEnvelope, []byte, error) {
+	var env apiEnvelope
 	applyConnectionHeader(req)
 	// 官方真机四段编码（chat / report / billing / refresh 全链路同值）。显式声明会
 	// 关闭 net/http 的透明解压，故下方必须按 Content-Encoding 手动解；chat 的 SSE
@@ -1211,33 +1234,32 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return env, nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return env, nil, fmt.Errorf("read body: %w", err)
 	}
 	// 先解压再分类：400 分支若拿到压缩体，Classify 会把乱码当文本导致误罚号。
 	if raw, err = decodeResponseBody(resp.Header.Get("Content-Encoding"), raw); err != nil {
-		return nil, fmt.Errorf("decode body: %w", err)
+		return env, nil, fmt.Errorf("decode body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: gatewayMsgFromResp(kind, resp, string(raw))}
+		return env, raw, &Error{Kind: kind, Status: resp.StatusCode, Msg: gatewayMsgFromResp(kind, resp, string(raw))}
 	}
-	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
+		return env, raw, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if env.Code != 0 {
 		kind := Classify(resp.StatusCode, env.Msg)
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
+		return env, raw, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
 	}
-	return env.Data, nil
+	return env, raw, nil
 }
 
 // RefreshToken 刷新 access token；成功时更新 a 的字段（缺省值保留旧值），
