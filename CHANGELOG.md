@@ -3,6 +3,50 @@
 本项目的版本变更记录。更早版本的发布说明见
 [GitHub Releases](https://github.com/jin66god/workbuddy2api-panel/releases)。
 
+## v1.24.9（2026-11-10）
+
+### 修复
+
+- **传输层失败记到出口，不再顺着轮转给每个被选中的号记连败**：拨号 / TLS 失败发生在
+  服务端看到这个号之前，不携带任何「这个号坏了」的证据，而直连出口由本域全部账号共用。
+  此前无条件 `NoteFailures(acct.UID)`，一次几秒的链路抖动会被 `MaxRotate` 放大成 3 个号的
+  连败，两轮就把池子推向 `degradeThreshold` 降权。改为新增 `internal/pool/egress.go`
+  （键 `direct:<realm>`、60 秒窗口、不落盘）+ 秒级阶梯 `egressBackoff`（1s 起、翻倍、
+  封顶 15s），连败达 4 次直接 503，不再空转换号。搜索端点的同类分支（`search.go`）一并
+  归因到出口。
+- **cockpit 导入接住三种真实形态，全新部署不再首次导入就 ENOENT**：旧实现只认「顶层数组
+  + snake_case」，而单账号详情导出是 `{account,auth}` 嵌套驼峰、部分工具导出是信封或
+  `{"<uid>":{…}}` 字典。新增 `decodeCockpitAccounts` 统一归一；补
+  `os.MkdirAll(AuthDir)`（login.go/apikey.go 都有，唯独导入漏了：`auths/` 尚不存在时
+  写盘直接 ENOENT，而启动日志一切正常）；`expires_at` 按 1e11 分界归一毫秒（单账号详情
+  是秒级，此前无条件 `/1000` 会把有效期算成 1970，账号一进池就「已过期」）。信封键
+  （`accounts`/`data`/…）不再被当成 uid。
+- **11151 空 text 段：出站前补位，漏网时按请求级错误 400 透传**：服务端对空串 / null /
+  缺失的 text 段判硬 400，且**字符串 content 以 `[` 开头会被当 parts 嗅探**——工具结果
+  里的表单抓取正是这个形状。新增 `empty_text_part.go` 只补值不删段（填一个空格），并新增
+  `ErrEmptyContent` 分类：同一 body 换任何号都会被同一处拒绝，不再轮转放大、也不再把它
+  伪装成「账号不可用，稍后重试」。
+- **只发 `metadata.user_id` 的客户端也粘账号，前缀缓存不再全量 miss**：这类请求被
+  `ExtractKey` 的 anti-monopoly 闸判成无会话键，此前既不绑定账号、`convID` 也为空 →
+  每轮换号 + `prompt_cache_key` 退化成每账号一个常量槽。新增 `session.DeriveCacheKey`
+  （system + 首条 user 的内容哈希），绑定 / 解绑 / 成功重绑与会话头聚合键统一改用它；
+  派生键是**对话级**，同一 user 的并行对话首条 user 不同则键不同，不复活 user 维度粘性。
+- **Kimi / GLM / MiniMax / MiMo / Step / Space-Bunny 补 `reasoning` 镜像**：这些家族按
+  `reasoning` 读历史，客户端只发 `reasoning_content` 时服务端看到「assistant 没思考」，
+  多轮一致性校验会挂。新增 `reasoning_mirror.go`，只镜像已有的非空值、绝不新建字段或填
+  占位（与 deepseek 那份「补齐含占位」的纪律刻意分开）；带 `cn:`/`global:` 前缀的模型名
+  先剥前缀再匹配。
+- **资料接口空昵称不再静默成功，并兼容顶层平铺响应**：`/console/account` 实测有
+  `{code,data:{…}}` 与 `{uid,nickname}` 两种形态，旧实现只看 `data`，平铺响应会得到空
+  对象；空昵称又被当成成功返回 `""`，而 `SetNickname` 对空串返回 false——既不算更新也
+  不算失败，整批都拿不到昵称时日志一行都不打。改为 `doJSONRaw` 交出原始体判形态、空昵称
+  按失败返回。
+
+### 工具
+
+- **`scripts/cache_audit.py`**：按输入档位审计前缀缓存命中率，把「冷启动必然 miss」与
+  「暖会话被打断」拆开算，给出暖会话打断率——用来验收上面那条派生键修复的真实收益。
+
 ## v1.24.8（2026-11-08）
 
 ### 修复
