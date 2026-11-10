@@ -1,3 +1,28 @@
+## v1.24.10（2026-11-10）
+
+### 新增
+
+- **更新提醒**：面板每 6 小时查一次 GitHub Releases 的 latest tag，与进程内版本比较；
+  有新版本时在顶栏显示提示条（版本号、更新说明链接、忽略此版本）。结果并入
+  `/panel/api/overview` 下发，前端复用已有的 5 秒轮询，不新增请求；后端有 6 小时缓存，
+  检查失败只记录 `update.error`，不影响面板其它功能。
+- **面板一键更新（可选）**：配 `WB2API_WATCHTOWER_URL` 后，提示条上的「立即更新」会
+  POST 到旁路升级器（watchtower HTTP API 模式），由它拉新镜像并重建本容器；
+  未配置时按钮降级为「复制命令」（`docker compose pull && docker compose up -d`）。
+
+### 设计边界
+
+- 面板**不挂 Docker socket、不执行 docker 命令**：容器内没有 docker CLI，而给面板
+  socket 等于把宿主 root 交给一个 HTTP 服务。升级动作由旁路容器执行，socket 只给它，
+  且只更新带 `com.centurylinklabs.watchtower.enable=true` label 的本容器。
+- 版本比较按数字段逐位（`1.24.9` < `1.24.10`），剥掉 `v` 前缀与 `-panel` 后缀；
+  无法解析的段按 0 处理，宁可漏报不误报（误报会让用户反复看到升不上去的提示）。
+
+### 配置
+
+`WB2API_UPDATE_CHECK`（默认 1）/ `WB2API_UPDATE_REPO` / `WB2API_UPDATE_INTERVAL`（默认 6h）/
+`WB2API_WATCHTOWER_URL` / `WB2API_WATCHTOWER_TOKEN`，说明见 README「升级与更新提醒」。
+
 # Changelog
 
 本项目的版本变更记录。更早版本的发布说明见

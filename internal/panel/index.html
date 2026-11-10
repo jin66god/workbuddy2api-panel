@@ -622,6 +622,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     color: var(--ink-2);
     padding: 6px 12px;
   }
+/* 更新提示条：有新版本时出现在顶栏下方，不影响侧栏与内容布局。
+   默认 hidden，由 app.js 的 renderUpdate() 按 overview 的 update 字段渲染。 */
+.updbar { display: flex; align-items: center; gap: 10px; margin: 0 0 12px;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--accent-soft); font-size: 12.5px; color: var(--ink-2); }
+.updbar[hidden] { display: none; }
+.updbar .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.updbar .msg { color: var(--ink); }
+.updbar .msg b { color: var(--accent); font-weight: 650; }
+.updbar .uact { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; text-decoration: none; }
+.updbar .uact:hover { border-color: var(--accent); color: var(--ink); }
+.updbar .uact.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.updbar .uact[hidden] { display: none; }
+@media (max-width: 640px) {
+  .updbar { flex-wrap: wrap; gap: 8px; }
+  .updbar .grow { display: none; }
+}
 </style>
 <!-- 移动端适配：独立文件，必须在主 <style> 之后（@media 覆盖依赖层叠顺序） -->
 <link rel="stylesheet" href="mobile.css">
@@ -677,6 +695,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </button>
       <button id="btnRefresh">刷新</button>
       <button class="primary" id="btnAdd">添加账号</button>
+    </div>
+
+    <!-- 更新提示：overview 里带 update 字段（update.go），5 秒轮询自动刷新。
+         one_click=true 时显示「立即更新」（走旁路升级器），否则只给「复制命令」。 -->
+    <div class="updbar" id="updBar" hidden>
+      <span class="dot"></span>
+      <span class="msg" id="updMsg">发现新版本</span>
+      <span class="grow"></span>
+      <button class="uact primary" id="updApply" hidden>立即更新</button>
+      <button class="uact" id="updCopy" hidden>复制命令</button>
+      <a class="uact" id="updNotes" href="#" target="_blank" rel="noopener" hidden>更新说明</a>
+      <button class="uact" id="updIgnore">忽略此版本</button>
     </div>
 
     <!-- 账号池 -->

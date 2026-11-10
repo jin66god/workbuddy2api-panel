@@ -555,6 +555,7 @@ async function loadOverview(quiet, force) {
     $('navVer').textContent = 'v' + d.version;
     $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
+    renderUpdate(d.update);
     const p = $('navPulse');
     p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
@@ -574,6 +575,63 @@ async function loadOverview(quiet, force) {
     const liveFresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
     if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
+}
+
+/* ── 更新提示（internal/panel/update.go） ────────────────────────────
+   数据随 overview 一起下发（后端 6 小时缓存，前端 5 秒轮询零额外请求）。
+   one_click=true 表示宿主机配了旁路升级器，按钮可直接触发拉镜像重建；
+   否则只给「复制命令」——面板本身不持有 Docker 权限，不给它 socket。 */
+const UPD_IGNORE_KEY = 'wb2api.updIgnore';
+let updBusy = false;
+const UPD_CMD_FALLBACK = 'docker compose pull && docker compose up -d';
+
+function renderUpdate(u) {
+  const bar = $('updBar');
+  if (!bar) return;
+  if (!u || !u.enabled || !u.has_update) { bar.hidden = true; return; }
+  if (localStorage.getItem(UPD_IGNORE_KEY) === u.latest) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.dataset.latest = u.latest || '';
+  $('updMsg').innerHTML = '发现新版本 <b>' + esc(u.latest) + '</b>（当前 v' + esc(u.current) + '）';
+  $('updApply').hidden = !u.one_click;
+  $('updCopy').hidden = !!u.one_click;
+  $('updNotes').hidden = !u.release_url;
+  if (u.release_url) $('updNotes').href = u.release_url;
+  $('updCopy').dataset.cmd = u.command || UPD_CMD_FALLBACK;
+}
+
+if ($('updIgnore')) {
+  $('updIgnore').onclick = () => {
+    const latest = $('updBar').dataset.latest || '';
+    if (latest) localStorage.setItem(UPD_IGNORE_KEY, latest);
+    $('updBar').hidden = true;
+  };
+  $('updCopy').onclick = async () => {
+    const cmd = $('updCopy').dataset.cmd || UPD_CMD_FALLBACK;
+    try { await navigator.clipboard.writeText(cmd); toast('已复制：' + cmd, 'ok'); }
+    catch { prompt('复制下面的命令到宿主机执行', cmd); }
+  };
+  $('updApply').onclick = async () => {
+    if (updBusy) return;
+    updBusy = true;
+    const btn = $('updApply');
+    const label = btn.textContent;
+    btn.textContent = '更新中…';
+    try {
+      const r = await api('update/apply', { method: 'POST' });
+      toast(r.message || '已触发更新', 'ok');
+      // 容器即将重建：把横幅保留到断连，避免用户以为没生效。
+      $('updMsg').textContent = '正在更新，页面稍后会自动重连…';
+    } catch (e) {
+      // 未配置升级器（409）或升级器不可达：降级为「复制命令」，不让按钮看起来坏了。
+      toast(e.message, 'err');
+      $('updCopy').hidden = false;
+      $('updCopy').dataset.cmd = $('updCopy').dataset.cmd || UPD_CMD_FALLBACK;
+    } finally {
+      updBusy = false;
+      btn.textContent = label;
+    }
+  };
 }
 
 $('accBody').addEventListener('click', async ev => {

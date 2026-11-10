@@ -71,6 +71,11 @@ type Config struct {
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
 
+	// Update 版本更新检查与「一键更新」入口（update.go）。
+	// Enabled=false 时面板不展示任何更新信息；WatchtowerURL 为空时按钮降级为
+	// 「复制升级命令」——面板自身不持有 Docker 权限。
+	Update UpdateOptions
+
 	// 运行日志持久化与导出（v1.18.0）。LogDir 空 = 仅内存（旧行为）。
 	LogDir           string
 	LogRetentionDays int
@@ -121,6 +126,9 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// upd 版本更新检查缓存（update.go）；Enabled=false 时所有方法退化为空操作。
+	upd *updateInfo
 }
 
 // modelsCacheTTL 面板模型列表的结果缓存时长（测试可注入短值）。只缓存「零
@@ -175,6 +183,7 @@ func New(cfg Config) *Panel {
 		started: time.Now(),
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
+		upd:     newUpdateInfo(cfg.Update),
 	}
 	if cfg.LogDir != "" {
 		p.logStore = NewLogStore(cfg.LogDir, cfg.LogRetentionDays, cfg.LogMaxMB)
@@ -196,6 +205,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/mobile.css", p.mobileStyle)
 	p.mux.HandleFunc("GET /panel/mobile.js", p.mobileScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
+	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateStatus))
+	p.mux.HandleFunc("POST /panel/api/update/apply", p.withAuth(p.updateApply))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/logs/export", p.withAuth(p.logsExport))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -340,6 +351,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		// 更新（默认每 5 分钟）——把这两个数透出，前端才能如实标注「x 分钟前更新」。
 		"balance_refresh_sec":  p.balanceRefreshSec(),
 		"balance_refreshed_at": p.balanceRefreshedAt(),
+		// 更新检查结果（update.go）：前端在侧栏版本号与顶栏横幅上直接用，
+		// 不额外发请求——overview 本身已是 5 秒轮询，后端有 6 小时缓存。
+		"update": p.upd.view(p.cfg.Version),
 	})
 }
 

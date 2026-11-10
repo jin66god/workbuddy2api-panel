@@ -167,6 +167,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 账号备注 | 账号池 / 用量明细 / 积分扣除三表共享映射（本机 localStorage） |
 | 积分历史 | 余额观察者逐次比对留痕，原子落盘、上限 2000 条 |
 | 到期提醒 | 首页快照与「检查」同口径：按自然日聚合批次，`DeductionEndTime` 优先，标注后台刷新节奏 |
+| 更新提醒与一键更新 | 定时查 GitHub Releases，面板顶栏提示新版本；配旁路升级器（watchtower HTTP API）后「立即更新」直接拉镜像重建，未配置则降级为复制 compose 命令 |
 | 积分到期折叠 | 折叠状态内存兜底（localStorage 抛 `SecurityError` 时仍可用）+ 静态资源 `no-cache` + `?v=<版本>` 破 CDN 缓存 |
 
 ### 接入与协议
@@ -317,6 +318,37 @@ docker compose logs -f          # 跟踪日志
 docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
+
+### 升级与更新提醒
+
+网关会每 6 小时查一次 GitHub Releases（`WB2API_UPDATE_REPO`，默认本仓），发现比当前版本新的
+tag 就在面板顶栏显示提示条，带「更新说明」链接；点「忽略此版本」后该版本不再提示。
+
+升级本身有三种方式，按部署形态选：
+
+```bash
+# A. 手动（任何部署方式都可用）
+docker compose pull && docker compose up -d
+
+# B. 一键（需要旁路升级器，见 docker-compose.yml 末尾的 watcher 段）
+#    面板点「立即更新」→ 后端 POST {watcher}/v1/update → watchtower 拉镜像并重建本容器
+#    .env 里设 WB2API_WATCHTOWER_URL=http://watcher:8080 与 WB2API_WATCHTOWER_TOKEN
+
+# C. 非 Docker（Windows 单文件 / 源码运行）：下载新 Release 覆盖二进制后重启
+```
+
+**为什么面板不自己 `docker pull`**：容器内既没有 docker CLI 也没有 socket，而把
+`/var/run/docker.sock` 挂进面板等于把宿主 root 权限交给一个 HTTP 服务。所以「一键」由
+旁路升级器执行，socket 只给它，且只更新带 `com.centurylinklabs.watchtower.enable=true`
+label 的容器。没配升级器时按钮会降级成「复制命令」，不会假装能一键。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `WB2API_UPDATE_CHECK` | `1` | 设为 `0` 关闭更新检查（面板不显示任何更新信息） |
+| `WB2API_UPDATE_REPO` | `jin66god/workbuddy2api-panel` | 检查哪个仓库的 latest release |
+| `WB2API_UPDATE_INTERVAL` | `6h` | 检查间隔（Go duration） |
+| `WB2API_WATCHTOWER_URL` | 空 | 旁路升级器地址；空 = 只能复制命令 |
+| `WB2API_WATCHTOWER_TOKEN` | 空 | 升级器 HTTP API 的 Bearer token |
 
 ### 方式二：Windows 单文件运行（无需 Docker）
 

@@ -35,7 +35,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.24.9-panel"
+const appVersion = "1.24.10-panel"
 
 // insecureKeyWarning 空 api_key = 完全不鉴权（httpauth.VerifyBearer 对空 key 恒放
 // 行），样例占位符 test_key = 人尽皆知的弱密钥；叠加非回环监听（缺省 ":7863" 绑
@@ -367,6 +367,10 @@ func main() {
 		},
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
+		// 版本更新提醒与「一键更新」入口（update.go）：配置全部来自环境变量，
+		// 见 updateOptionsFromEnv —— 更新检查是运维级开关，放 compose 的
+		// environment 里比放 config.json 更直接（不改配置结构）。
+		Update: updateOptionsFromEnv(),
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -719,4 +723,34 @@ func logDirOf(cfg *Config) string {
 		return ""
 	}
 	return stateSibling(cfg.StateFile, "logs")
+}
+
+// updateOptionsFromEnv 从环境变量构建面板更新检查配置（见 internal/panel/update.go）。
+//
+//	WB2API_UPDATE_CHECK=0      关闭更新检查（默认开启）
+//	WB2API_UPDATE_REPO         GitHub 仓库（默认 jin66god/workbuddy2api-panel）
+//	WB2API_UPDATE_INTERVAL     检查间隔（默认 6h，Go duration 语法）
+//	WB2API_WATCHTOWER_URL      旁路升级器 HTTP API 地址（空 = 只能复制命令）
+//	WB2API_WATCHTOWER_TOKEN    升级器 Bearer token（可空）
+func updateOptionsFromEnv() panel.UpdateOptions {
+	opt := panel.UpdateOptions{
+		Enabled:         true,
+		Repo:            "jin66god/workbuddy2api-panel",
+		Interval:        6 * time.Hour,
+		WatchtowerURL:   strings.TrimSpace(os.Getenv("WB2API_WATCHTOWER_URL")),
+		WatchtowerToken: strings.TrimSpace(os.Getenv("WB2API_WATCHTOWER_TOKEN")),
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2API_UPDATE_REPO")); v != "" {
+		opt.Repo = v
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WB2API_UPDATE_CHECK"))) {
+	case "0", "false", "off", "no":
+		opt.Enabled = false
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2API_UPDATE_INTERVAL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			opt.Interval = d
+		}
+	}
+	return opt
 }
