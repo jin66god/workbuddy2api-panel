@@ -57,7 +57,11 @@ services:
   #      echo "WB2API_WATCHTOWER_TOKEN=$(openssl rand -hex 16)" >> .env
   #   3) docker compose up -d
   # watcher:
-  #   image: containrrr/watchtower:latest
+  #   # 原 containrrr/watchtower 已于 2025-12-17 归档（仓库变只读，不再跟 Docker
+  #   # Engine API 演进）。这里用活跃维护的 fork：镜像名改 nickfedor/watchtower，
+  #   # 命令参数、WATCHTOWER_* 环境变量与 HTTP API 路径（/v1/update）全部兼容，
+  #   # 是 drop-in 替换；镜像含 linux/amd64、arm64、arm/v6、386、riscv64。
+  #   image: nickfedor/watchtower:latest
   #   container_name: wb2api-watcher
   #   restart: unless-stopped
   #   command: --http-api-update --label-enable --cleanup

@@ -330,7 +330,8 @@ tag 就在面板顶栏显示提示条，带「更新说明」链接；点「忽�
 # A. 手动（任何部署方式都可用）
 docker compose pull && docker compose up -d
 
-# B. 一键（需要旁路升级器，见 docker-compose.yml 末尾的 watcher 段）
+# B. 一键（需要旁路守护容器，见 docker-compose.yml 末尾的 watcher 段；
+#    镜像用 nickfedor/watchtower——原 containrrr/watchtower 已于 2025-12-17 归档）
 #    面板点「立即更新」→ 后端 POST {watcher}/v1/update → watchtower 拉镜像并重建本容器
 #    .env 里设 WB2API_WATCHTOWER_URL=http://watcher:8080 与 WB2API_WATCHTOWER_TOKEN
 
