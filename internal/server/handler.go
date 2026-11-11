@@ -442,6 +442,19 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	if mi.IsDefault {
 		entry["is_default"] = true
 	}
+	// 限时优惠（上游 modelPromotions）：credits 是**牌价**，promo_* 才是当前生效折扣。
+	// 面板 /panel/api/models 一直有这三个字段，OpenAI 兼容端点此前没有——第三方客户端/
+	// 启动器只读 /v1/models，于是限时免费的模型被显示成收费（或显示旧牌价）。
+	// PromoFactor 用 != nil 判断而不是 != 0：0 恰恰是「限时免费」这个最该被看到的取值。
+	if mi.PromoFactor != nil {
+		entry["promo_factor"] = *mi.PromoFactor
+		if mi.PromoCredits != "" {
+			entry["promo_credits"] = mi.PromoCredits
+		}
+	}
+	if mi.PromoLabel != "" {
+		entry["promo_label"] = mi.PromoLabel
+	}
 	if mi.SupportsImages {
 		entry["supports_images"] = true // 多模态能力透出
 	}
@@ -810,6 +823,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if stickyUID != "" && uid == stickyUID {
 			unbindSticky()
 		}
+	}
+	// failKeepBinding 供**请求级错误**（内容拦截 / prompt 超长 / 图片无效 / 参数错 /
+	// 空 text 段）使用：只释放租约，**不解绑会话粘性**。
+	//
+	// 这些错误与账号无关——同一个 body 换任何号都会撞，账号本身仍然健康、它的
+	// 上游前缀缓存也还热着。一旦解绑，客户端重试会被分到另一个号上，十万~几十万
+	// token 的前缀从头重算（实测同号命中 97-99%、换号 0-12%），观感就是「报错一次
+	// 之后缓存再也不生效」，而且上游 content_blocked 成片出现时会连环换号，每一跳
+	// 都是全量 miss。账号级故障（401/403/429 冷却、熔断、连败）仍走 fail() 解绑。
+	failKeepBinding := func(string) {
+		releaseHeld()
 	}
 	// ttfb 首 token 等待（仅流式有观测；非流式传 0 = 无观测，速率不扣减）。
 	// 显式入参而不是读 st.ttfb：后者在流式分支里是**调用之后**才赋值的，
@@ -1215,7 +1239,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// error-passthrough：message 装上游 body 原文（code/msg/requestId 原样），
 				// 不再改写成网关固定文案——客户端必须看到真实错误才能排查。
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				// 请求级错误：只释放租约，不解绑粘性（详见 failKeepBinding 注释）。
+				failKeepBinding(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
@@ -1235,7 +1260,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 的错误信息，客户端必须看到，禁止固定词覆盖）。
 			if kind == upstream.ErrPromptTooLong {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding(acct.UID)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
 					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
@@ -1246,7 +1271,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
 			if kind == upstream.ErrImageInvalid {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					msg = "image request was rejected by upstream"
@@ -1264,7 +1289,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 客户端于是对必然失败的请求无限重试。立即透传上游原文回 400。
 			if kind == upstream.ErrBadParams {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					msg = "chat request body was rejected by upstream"
@@ -1279,7 +1304,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 同一 body 换任何账号都会被同一处拒绝。立即透传上游原文回 400。
 			if kind == upstream.ErrEmptyContent {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
-				fail(acct.UID)
+				failKeepBinding(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
 					msg = "a message in the request history has empty content"
