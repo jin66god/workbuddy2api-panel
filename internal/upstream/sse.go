@@ -708,10 +708,34 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 
 	// writeFrame 把 payload 按规范白名单重建后以 data: 帧写出并 flush。
 	// 仅 JSON 解析成功时计数记为一次有效转发（JSON 解析失败照常降级原样写出，但不计数）。
-	writeFrame := func(payload string) (int, error) {
+	// 声明与赋值分开：粘帧拆分需要递归调用本帧处理。
+	var writeFrame func(string) (int, error)
+	writeFrame = func(payload string) (int, error) {
 		var obj map[string]any
 		if json.Unmarshal([]byte(payload), &obj) != nil {
-			// 非 JSON 帧：原样降级写出，不计数（与修复前一致）。
+			// 粘帧：上游偶发把两个 chunk 塞进同一个 data 行，形如 `data: {a} {b}`。
+			// 原样透传会让客户端按 SSE 规范把整行当一个 JSON 解析，直接失败在
+			// 「第二个对象」上（Unexpected non-whitespace character after JSON），
+			// 整轮对话作废。这里拆成多个对象逐个走常规路径，客户端收到的每帧都是
+			// 单个合法 JSON。
+			if parts := splitConcatenatedJSON(payload); len(parts) > 1 {
+				log.Printf("WARN: [upstream] data 帧内含 %d 个 JSON 对象（上游粘帧）→ 拆成独立帧透传，首个 %.120q",
+					len(parts), truncate(parts[0], 120))
+				n := 0
+				for _, part := range parts {
+					c, werr := writeFrame(part)
+					if werr != nil {
+						return n, werr
+					}
+					n += c
+				}
+				return n, nil
+			}
+			// 非 JSON 帧：原样降级写出，不计数（与修复前一致）。看起来该是 JSON 却
+			// 解析失败时留一行 WARN——静默透传时线上完全查不到这条线索。
+			if looksLikeJSON(payload) {
+				log.Printf("WARN: [upstream] data 帧不是合法 JSON → 原样透传 %.160q", truncate(payload, 160))
+			}
 			if werr := writeSSE(payload); werr != nil {
 				return 0, werr
 			}
