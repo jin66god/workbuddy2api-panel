@@ -67,6 +67,19 @@ func (p *Pool) NoteCheckinDone(uid string) {
 	}
 }
 
+// CheckinDoneToday 报告该账号今天是否已签到（本地记账；成功与上游幂等拒绝都算）。
+// 供调度器的延后补签在重试前跳过已经签成的账号（用户可能在手机上签过，上一档
+// 补签也可能已经成功）。
+func (p *Pool) CheckinDoneToday(uid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	return e.lastCheckinDay == cst.Day(time.Now())
+}
+
 // CreditsSnapshot 一次余额查询的完整结果（含按日到期批次）。
 // 调度器/面板把 upstream.UserResourceSnapshot 的输出转换成本结构后写入池。
 type CreditsSnapshot struct {

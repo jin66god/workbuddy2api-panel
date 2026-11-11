@@ -501,7 +501,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 func (s *Scheduler) dispatch(ctx context.Context, k taskKind, spread bool) {
 	switch k {
 	case taskCheckin:
-		s.runCheckin(spread)
+		s.runCheckin(ctx, spread)
 	case taskTravel:
 		s.runTravel(spread)
 	case taskActivity:
@@ -562,12 +562,17 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
 // 末尾追加连登管家（streak.go）：可兑换档位自动兑换 + 抽奖次数自动抽完——
 // 连登兑换按天数解锁，挂在每日签到后即「到天数那天自动完成兑换→抽奖闭环」。
-func (s *Scheduler) RunCheckinNow() { s.runCheckin(false) }
+func (s *Scheduler) RunCheckinNow() { s.runCheckin(context.Background(), false) }
 
-func (s *Scheduler) runCheckin(spread bool) {
+func (s *Scheduler) runCheckin(ctx context.Context, spread bool) {
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	list := s.cfg.Pool.List()
+	// retryUIDs 本轮「瞬时失败」的账号：本批跑完后按 checkinRetryDelays 后台补签。
+	// 上游对签到偶发返回 500 + code 10001「签到失败，请稍后重试」，而 DailyCheckin 的
+	// 内联重试只有 2s/4s——覆盖不了分钟级沉降，此前只能等下一轮排程（12 小时后），
+	// 漏一天就是断连登。
+	var retryUIDs []string
 	var plan *spreadPlan
 	if spread {
 		uids := make([]string, 0, len(list))
@@ -605,25 +610,12 @@ func (s *Scheduler) runCheckin(spread bool) {
 		// token_source=enterprise_switch 不再是门控判据（issue #4）：签到与成长任务
 		// 对该形态实测正常，企业形态一律以 enterpriseId 为准。
 		if a.SupportsPersonalEndpoints() {
-			// 本地已记录今天签到（登录 / 手动 / 上一轮排程）→ 不再盲发一次注定 400
-			// 的请求。lastCheckinDay 只在收到上游成功或「今天已签到」幂等响应后置位，
-			// 跨自然日自动失效，不会漏签。
-			if st.CheckinDone {
-				log.Printf("checkin %s: 今日已签到（本地记录），跳过", logfmt.Label(st.UID, st.Nickname))
-			} else if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
-				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
-				if upstream.IsAlreadyCheckin(err) {
-					s.cfg.Pool.NoteCheckinDone(st.UID)
-					log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(st.UID, st.Nickname))
-				} else {
-					log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
-				}
-				// 其余业务错误也继续走余额查询
-			} else {
-				// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
-				// 重复触发时出现），成功也落一行。
-				s.cfg.Pool.NoteCheckinDone(st.UID)
-				log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
+			done, cerr := s.checkinOne(a, st.UID, st.Nickname)
+			if !done && cerr != nil && upstream.IsTransientBilling(cerr) {
+				// 只有「过一会儿再试可能好」的失败才值得排补签。业务拒绝（企业号
+				// 10001「不支持该操作」、参数错）重试必然同样失败，排进去只会每天
+				// 多打几轮无效请求。
+				retryUIDs = append(retryUIDs, st.UID)
 			}
 		}
 		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次与
@@ -644,6 +636,39 @@ func (s *Scheduler) runCheckin(spread bool) {
 		})
 	}
 	s.RunStreakBonusNow()
+	// 补签放在本批收尾之后：不阻塞主排程（后台 goroutine），且只在真有瞬时失败时启动。
+	s.startCheckinRetry(ctx, retryUIDs)
+}
+
+// checkinOne 单账号签到。主批与延后补签共用同一份判据（本地已签记账、上游幂等
+// 拒绝），日志文案与主批原实现逐字一致。
+//
+// 返回 done=true 表示今天已经签成（本地记账命中 / 签到成功 / 上游幂等拒绝）；
+// done=false 且 err!=nil 才是真失败，由调用方按 IsTransientBilling 决定是否补签。
+func (s *Scheduler) checkinOne(a *auth.Auth, uid, nickname string) (done bool, err error) {
+	label := logfmt.Label(uid, nickname)
+	// 本地已记录今天签到（登录 / 手动 / 上一轮排程 / 上一档补签）→ 不再盲发一次
+	// 注定 400 的请求。lastCheckinDay 只在收到上游成功或「今天已签到」幂等响应后
+	// 置位，跨自然日自动失效，不会漏签。
+	if s.cfg.Pool.CheckinDoneToday(uid) {
+		log.Printf("checkin %s: 今日已签到（本地记录），跳过", label)
+		return true, nil
+	}
+	if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+		// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
+		if upstream.IsAlreadyCheckin(err) {
+			s.cfg.Pool.NoteCheckinDone(uid)
+			log.Printf("checkin %s: 今天已签到（幂等）", label)
+			return true, nil
+		}
+		log.Printf("checkin %s: %v", label, err)
+		return false, err
+	}
+	// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在重复
+	// 触发时出现），成功也落一行。
+	s.cfg.Pool.NoteCheckinDone(uid)
+	log.Printf("checkin %s: 签到成功", label)
+	return true, nil
 }
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。

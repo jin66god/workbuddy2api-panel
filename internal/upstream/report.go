@@ -80,6 +80,12 @@ func isTransientBillingErr(err error) bool {
 	return true
 }
 
+// IsTransientBilling 导出「这次计费类失败值不值得过一会儿再试」的判据，供调度器
+// 决定要不要把账号放进延后补签队列。签到本身已有 2s/4s 两次内联重试，覆盖不了
+// 上游「签到失败，请稍后重试」这种需要分钟级沉降的形态（实测 6 秒内三次全败、
+// 20 分钟后手动重签立刻成功）。
+func IsTransientBilling(err error) bool { return isTransientBillingErr(err) }
+
 // retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
 // 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。chat 热路径
 // 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
