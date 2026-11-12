@@ -16,7 +16,7 @@ import (
 
 const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐 CN 官方桌面端 5.8.3（2026-10-20 真机抓包）。
+	// 白名单头组的 X-IDE-Version）。对齐 CN 官方桌面端 5.9.3（2026-10-28 真机 661 条请求验证）。
 	// config upstream.client_version 可覆盖（空 = 内置默认，CN/global 共用覆盖值）。
 	defaultClientVersion = "5.9.3"
 	// defaultGlobalClientVersion 国际版官方客户端版本。两版发版节奏不同（CN 5.9.3 /
@@ -24,7 +24,7 @@ const (
 	// 5.9.4 取值证据（2026-10-30 拆包 + 真机抓包）：app.asar/package.json version、
 	// cli/product.json genieVersion、真机 UA / X-IDE-Version 三处一致。
 	defaultGlobalClientVersion = "5.9.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.161.0）。
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.165.0）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
 	defaultCliVersion = "2.165.0"
 
@@ -34,7 +34,7 @@ const (
 
 // originRefererFor 按账号 realm / domain 返回 Origin/Referer 基础域：
 // global → 账号签发域（codebuddy.ai 或 workbuddy.ai，按 auth 文件 domain）；
-// cn（含全局开关未开）→ https://www.codebuddy.cn。
+// cn（含全局开关未开）→ https://www.workbuddy.cn。
 func originRefererFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
 		if b := loginsite.BaseForDomain(a.DomainValue()); b != "" {
@@ -55,7 +55,7 @@ func (c *Client) clientVersion() string {
 }
 
 // clientVersionFor 按账号 realm 返回生效的客户端版本：显式配置优先，否则
-// global 用 5.8.4、CN 用 5.8.3（两版发版节奏不同，真机抓包 2026-10-20）。
+// global 用 5.9.4、CN 用 5.9.3（两版发版节奏不同）。
 func (c *Client) clientVersionFor(a *auth.Auth) string {
 	if c != nil && c.ClientVersion != "" {
 		return c.ClientVersion
@@ -78,8 +78,8 @@ func (c *Client) cliVersion() string {
 // `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`。
 //
 // 品牌段按 realm 切换（2026-10-20 双版本真机抓包，同机同代理）：
-//   - CN 5.8.3：`WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`（驼峰原样）；
-//   - global 5.8.4：`workbuddy-ai/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`（小写连字符，
+//   - CN 5.9.3：`WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`（驼峰原样）；
+//   - global 5.9.4：`workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`（小写连字符，
 //     来自归档时 productName 的 slug 化）。
 //
 // 两版规则不同：曾把 global 写成 `WorkBuddy AI`（旧逆向证据）或把 CN 也套成 slug，

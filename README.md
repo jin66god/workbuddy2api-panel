@@ -179,7 +179,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 原生 tool_calls 还原 | 上游标记文本在客户端未声明 `tools` 时还原为结构化 `tool_calls`（流式 / 非流式） |
 | 推理模型兼容 | DeepSeek 思维链注入、`reasoning_content` 回填、effort 档位降级、`reasoning_text` 剥离 |
 | 渠道校验形态 | 首条非 system 自动补 system（`developer` 就地归一）+ 会话头三件套缺失兜底，从源头避免 `11-128 first message is not system prompt` / `conversation id missing` |
-| 出站指纹 | UA 按 realm 分档（CN `WorkBuddy/5.8.3`、global `workbuddy-ai/5.8.4`，CLI `2.161.0`），global chat 补 `X-Private-Data`，对齐官方客户端抓包 |
+| 出站指纹 | UA 按 realm 分档（CN `WorkBuddy/5.9.3`、global `workbuddy-ai/5.9.4`，CLI `2.165.0`），global chat 补 `X-Private-Data`，对齐官方客户端抓包 |
 | 缓存命中修复 | 补齐 body 级 `conversation_id`，修前缀缓存整段未命中 |
 
 ### 账号池与稳定性
@@ -488,7 +488,7 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
-| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 按账号身份自动：CN `WorkBuddy/5.8.3` · global `workbuddy-ai/5.8.4`，CLI 段 `2.161.0`）。官网「使用端」列按出站 UA 服务端归因 |
+| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 按账号身份自动：CN `WorkBuddy/5.9.3` · global `workbuddy-ai/5.9.4`，CLI 段 `2.165.0`）。官网「使用端」列按出站 UA 服务端归因 |
 | `cn.chat_base` | `https://www.workbuddy.cn` | 国内版对话 / 模型目录 base 覆盖（空 = 内置默认；需重启） |
 | `cn.billing_base` | `https://www.codebuddy.cn` | 国内版积分 / 成长任务 base 覆盖（空 = 内置默认；需重启） |
 | `global.chat_base` | 空 | 国际版对话 / 模型目录 base 覆盖（空 = 按账号 domain 选官方主机；需重启） |
@@ -1005,7 +1005,7 @@ http://127.0.0.1:7863/panel/
 | `activity/growth/tasks/accept` | POST | 接受任务（`{"task_codes":[...]}`） |
 | `activity/growth/tasks/<task_code>/claim` | POST | **领取任务奖励**（任务码在路径、无 body；**Web 域 `www.workbuddy.cn`**，非 CLI 域——这是领奖能成功的关键） |
 
-出站请求按账号身份携带三段式 UA（CN `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`，global `workbuddy-ai/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`，可被 `upstream.user_agent` 整体覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
+出站请求按账号身份携带三段式 UA（CN `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`，global `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`，可被 `upstream.user_agent` 整体覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
 
 ## 请求级日志
 
