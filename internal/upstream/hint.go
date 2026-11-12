@@ -62,7 +62,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrSessionDead:
 		return "account session expired at upstream; the account is disabled until re-login"
 	case ErrHardCredit:
-		return "account credits exhausted at upstream; waiting for daily check-in to restore"
+		// 不能说「等签到恢复」：国际版账号没有签到活动（日志逐日「国际版签到活动
+		// 未开启，跳过」），积分只能靠充值/订阅恢复。旧文案对 global 号持有者是
+		// 一句永远不会兑现的承诺。
+		return "account credits exhausted at upstream; CN accounts recover via the next daily check-in, global accounts need a top-up"
 	case ErrUpstreamBusy:
 		// 6021 queue.full：渠道级容量满载。措辞明确「不是账号问题、换号无意义」，
 		// 指引客户端等待后重试（SDK 指数退避天然适配）。
