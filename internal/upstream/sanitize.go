@@ -22,6 +22,11 @@ var sanitizeFeatures = []string{
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
 	"Tokens prefixed with @ are paths",                // DSH 路径提示句首（与下句连排触发 11-128）
+	// 服务端注入的身份指令（assistant 消息里被模型复述后回流出站）。
+	// 必须挂在通用门控上：身份门控只对 system/developer 生效，而泄漏出现在
+	// assistant 消息里，挂错门控等于规则永远不执行。
+	"identify yourself as",
+	"model_identity",
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -196,6 +201,21 @@ var sanitizeIdentityRewrites = [][2]string{
 	{"DeepSeek Harness", "DeepSeekRuntime"},
 }
 
+// sanitizeInjectedIdentityRe 服务端注入的祈使句身份指令：
+// 「When asked about your <...> identity, identify yourself as <名字>.」
+//
+// 只认「identity, identify yourself as」连写：单独匹配 identify yourself as
+// 会误伤合法要求（"Do not identify yourself as an AI." 是客户端的正常约束）。
+var sanitizeInjectedIdentityRe = regexp.MustCompile(`(?is)when asked about your[^.\n]{0,80}identity,\s*identify yourself as[^.\n]{0,80}\.`)
+
+// sanitizeInjectedIdentityReplacement 中性表述：替换后不再含 identify yourself as，
+// 幂等（第二次净化不会再匹配）。
+const sanitizeInjectedIdentityReplacement = "State your actual model name when asked about your identity."
+
+// sanitizeModelIdentityTagRe 标签本身必须去掉、内部文本保留：标签留着会让模型
+// 继续把这段当成「有一个身份块」，下一轮再复述一遍。
+var sanitizeModelIdentityTagRe = regexp.MustCompile(`(?is)</?model_identity>`)
+
 // sanitizeText 单段非身份文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string { return sanitizeTextWith(text, false) }
 
@@ -222,6 +242,12 @@ func sanitizeTextWith(text string, identity bool) string {
 	}
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
+	}
+	// 服务端注入的身份指令回流：先剥标签（标签留着会继续被当成「身份块」），
+	// 再把祈使句整句换成中性表述。
+	text = sanitizeModelIdentityTagRe.ReplaceAllString(text, "")
+	if sanitizeInjectedIdentityRe.MatchString(text) {
+		text = sanitizeInjectedIdentityRe.ReplaceAllString(text, sanitizeInjectedIdentityReplacement)
 	}
 	if identity {
 		for _, rw := range sanitizeIdentityRewrites {
