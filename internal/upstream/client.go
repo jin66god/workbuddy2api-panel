@@ -264,6 +264,11 @@ func isPromptTooLongStatus(status int) bool {
 // 实测 code=10001/14001 "今天已签到"/"今日已签到"）。只对 *Error.Msg 做包含匹配，
 // 网络层/解析层错误不在此识别（见 IsAlreadyCheckin）。
 var alreadyCheckinMarkers = []string{"已签到", "already"}
+
+// checkinFailureMarkers 明确失败文案：必须压过 alreadyCheckinMarkers。
+// 「签到失败，已签到天数不足 7 天」同时含「已签到」，旧逻辑会把它当成幂等成功
+// 置 checkin_done，面板显示「今日已签」，实际是失败（少一次签到机会）。
+var checkinFailureMarkers = []string{"失败", "fail", "not started", "未开启", "不支持"}
 var badParamsMarkerCode = `"code":11101`
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
@@ -2776,6 +2781,14 @@ func IsAlreadyCheckin(err error) bool {
 	var ue *Error
 	if !errors.As(err, &ue) {
 		return false
+	}
+	// 失败文案优先：含「失败 / 不支持 / 未开启」的错误即使同时出现「已签到」
+	// 也不是幂等成功（典型「签到失败，已签到天数不足 7 天」）。
+	lowerMsg := strings.ToLower(ue.Msg)
+	for _, m := range checkinFailureMarkers {
+		if strings.Contains(lowerMsg, strings.ToLower(m)) {
+			return false
+		}
 	}
 	for _, m := range alreadyCheckinMarkers {
 		if strings.Contains(ue.Msg, m) || strings.Contains(strings.ToLower(ue.Msg), strings.ToLower(m)) {

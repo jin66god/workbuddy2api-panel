@@ -12,6 +12,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -713,6 +714,30 @@ func (p *Panel) accountResume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// upstreamErrText 上游业务错误的可读文案：取信封里的 msg，避免把
+// 「upstream client (http 400): {...}」整段原文塞给面板用户。
+func upstreamErrText(err error) string {
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.Msg != "" {
+		return ue.Msg
+	}
+	return err.Error()
+}
+
+// checkinOutcome 把签到结果映射成面板回执四态：checked / already / failed。
+// already 是「今天早就签过、上游一个积分都没发」，必须与 checked 分开——只凭
+// checkin_done 布尔时两者会显示同一句「签到成功」。
+func checkinOutcome(err error) (state, msg string) {
+	if err == nil {
+		return "checked", ""
+	}
+	msg = upstreamErrText(err)
+	if upstream.IsAlreadyCheckin(err) {
+		return "already", msg
+	}
+	return "failed", msg
+}
+
 // accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），
 // 与 scheduler.RunCheckinNow 的单号语义一致。
 func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
@@ -736,25 +761,29 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	checkinMsg := ""
 	checkinDone := false
+	// checkin_state 是「这次签到到底发生了什么」的权威答复，四态：
+	// checked（本次真签到）/ already（今天早就签过，一个积分都没发）/
+	// skipped（账号无签到体系）/ failed。只回 checkin_done 布尔会把
+	// already 与 checked 说成同一句「签到完成」，重复点还会看到成功观感。
+	checkinState := ""
 	// 无个人成长体系的账号不发起该调用，端点退化为「刷新额度」——企业额度（以及
 	// 静态 Key 的企业口径额度）走 get-enterprise-user-usage 口径（见 upstream）。
 	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能
 	// 调用）。判据与登录 / 导入 / 自动排程统一用 SupportsPersonalEndpoints，避免
 	// 新增账号形态时只改一处造成漂移。
 	if !a.SupportsPersonalEndpoints() {
+		checkinState = "skipped"
 		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
-	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
-		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。
-		if upstream.IsAlreadyCheckin(err) {
+	} else {
+		err := p.cfg.Upstream.DailyCheckin(a)
+		checkinState, checkinMsg = checkinOutcome(err)
+		// 真签到与幂等拒绝都算「今日已签」，按钮显示「已签」；失败不改按钮状态。
+		if err == nil || checkinState == "already" {
 			p.cfg.Pool.NoteCheckinDone(uid)
 			checkinDone = true
 		}
-	} else {
-		p.cfg.Pool.NoteCheckinDone(uid)
-		checkinDone = true
 	}
-	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
+	resp := map[string]any{"ok": true, "checkin_done": checkinDone, "checkin_state": checkinState}
 	if a.IsEnterprise() {
 		resp["enterprise"] = true
 	}

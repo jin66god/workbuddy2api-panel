@@ -646,7 +646,16 @@ $('accBody').addEventListener('click', async ev => {
   try {
     if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
-      toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+      // 四态来自后端：checked 真签到 / already 今天早就签过 / skipped 无签到体系 /
+      // failed。只凭 checkin_done 布尔时 already 与 checked 都弹「签到完成」，
+      // 上游一个积分都没发也会显示成功。
+      const st = r.checkin_state || (r.checkin_done ? 'checked' : 'failed');
+      // credits 是余额快照，不是本次签到发放的积分：文案写「余额」避免误读。
+      const bal = r.credits != null ? '，余额 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '';
+      if (st === 'already') toast('今天已签到，无需重复' + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+      else if (st === 'checked') toast('签到成功' + bal, 'ok');
+      else if (st === 'skipped') toast(r.checkin_message || '已跳过签到', 'ok');
+      else toast('签到失败' + (r.checkin_message ? '：' + r.checkin_message : ''), 'err');
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
