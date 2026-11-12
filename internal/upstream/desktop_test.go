@@ -119,3 +119,26 @@ func TestSetAppearanceTheme(t *testing.T) {
 		t.Errorf("body=%v want kind=theme resource_key=theme-tkmw7j", got)
 	}
 }
+
+// TestDesktopBuddyAppSequenceIsFirstPageIsBool 断言 buddyapp_enter_click 的
+// isFirstPage 是布尔 true。
+//
+// 回归位：服务端收紧 /v2/report 的格式校验后，字符串 "1" 会让整条事件被丢弃，
+// 响应仍是 2xx，只在 body 里说 dropped=1 / invalidIndices=[2]（正是五连的第三条）。
+// 任务判据吃不到这条，Buddy_App 与 Buddy_App_QQ 永远停在 0/1，日志只有一行 WARN。
+func TestDesktopBuddyAppSequenceIsFirstPageIsBool(t *testing.T) {
+	var found bool
+	for _, ev := range DesktopBuddyAppSequence("cb_test", "测试助手") {
+		if ev["eventCode"] != "buddyapp_enter_click" {
+			continue
+		}
+		found = true
+		v, ok := ev["isFirstPage"].(bool)
+		if !ok || !v {
+			t.Fatalf("isFirstPage = %#v (%T), want bool true", ev["isFirstPage"], ev["isFirstPage"])
+		}
+	}
+	if !found {
+		t.Fatal("五连事件里没有 buddyapp_enter_click")
+	}
+}
