@@ -64,6 +64,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
+| 🧩 **Responses 协议** | `POST /v1/responses` 原生受理 OpenAI Responses（Codex CLI 等只需这条）：入站翻成 chat 体后复用同一条账号池链路，出站把 chat SSE 逐帧翻回事件流，无需再前置 new-api 转换 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
 | 🔍 **联网搜索** | `POST /v1/search/messages` 把上游 `/agenttool/v1/search` 包成 Anthropic Messages 兼容形态（DSH 等客户端的搜索 provider 零改动接入）；复用账号池选号 / 在途租约 / token 刷新 / 错误冷却，出站请求头对齐官方客户端 |
 | 💬 **系统提示词体系** | `passthrough`（默认）/ `append` / `custom` 三模式；可选仅替换 Harness 身份首句；遇内容拦截可降级重试 |
@@ -176,6 +177,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 |---|---|
 | 静态 API Key 账号 | `ck_` / `pt_` 直接粘贴，无需浏览器 OAuth；额度走企业口径，成长任务自动隐藏 |
 | 联网搜索 | `POST /v1/search/messages`，Anthropic Messages 兼容，DSH 等客户端零改动接入 |
+| Responses 协议 | `POST /v1/responses`，Codex CLI 等只走 Responses 的客户端直接指向本网关；与 chat 共用选号/粘性/冷却/计费/请求记账 |
 | 原生 tool_calls 还原 | 上游标记文本在客户端未声明 `tools` 时还原为结构化 `tool_calls`（流式 / 非流式） |
 | 推理模型兼容 | DeepSeek 思维链注入、`reasoning_content` 回填、effort 档位降级、`reasoning_text` 剥离 |
 | 渠道校验形态 | 首条非 system 自动补 system（`developer` 就地归一）+ 会话头三件套缺失兜底，从源头避免 `11-128 first message is not system prompt` / `conversation id missing` |
@@ -434,6 +436,12 @@ curl -s http://localhost:7863/v1/chat/completions \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
+
+# Responses 协议（Codex CLI 走的就是这条；stream:false 时网关侧聚合）
+curl -sN http://localhost:7863/v1/responses \
+  -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","input":"hi","stream":true}'
 
 # 联网搜索（Anthropic Messages 兼容形态，走上游 /agenttool/v1/search）
 curl -s http://localhost:7863/v1/search/messages \
@@ -863,6 +871,77 @@ baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能
 
 **余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。间隔带 ±15% 稳定抖动（`schedule.balance_refresh_jitter_permill`，缺省 `150`），并把各账号请求在抖动窗口内摊开：同出口 IP 上「精确每 5 分钟全池同时刷新」是最容易识别的机器人形状。
 
+## Responses 端点
+
+### `POST /v1/responses`
+
+把 OpenAI **Responses** 协议适配到本网关：Codex CLI 这类只走 `/v1/responses` 的客户端
+不必再前置一层 new-api 做协议转换，把 `base_url` 指到本网关即可。
+
+适配方式是**协议适配**而不是复刻协议：入站请求翻译成 chat 请求体后复用
+`/v1/chat/completions` 的同一条链路（选号、在途租约、token 刷新、错误冷却、会话粘性、
+前缀缓存、计费、请求日志、工具标记修复全部继承），出站再把 chat SSE 逐帧翻成 Responses
+事件流。两条入站协议因此共享完全一致的账号处置与故障语义，不会出现「chat 被限流、responses
+还在往同一个号上撞」这种分裂。
+
+**请求字段**：`model` / `instructions` / `input`（字符串、单个 item、item 数组）/
+`tools`（扁平与嵌套两种形态）/ `tool_choice` / `parallel_tool_calls` / `max_output_tokens` /
+`reasoning.effort` / `text.format.json_schema` / `temperature` / `top_p` / `stream` / `metadata`。
+
+**事件序列**（`stream:true`）：
+
+```
+response.created → response.in_progress
+→ [reasoning]     output_item.added → reasoning_summary_part.added
+                  → reasoning_summary_text.delta … done → part.done
+→ [message]       output_item.added → content_part.added
+                  → output_text.delta … done → content_part.done
+→ [function_call] output_item.added → function_call_arguments.delta … done
+→ response.completed | response.failed
+```
+
+每帧带单调递增的 `sequence_number`；`response.completed` 的 `usage` 把 chat 的
+`prompt_tokens/completion_tokens` 映射成 `input_tokens/output_tokens`，并带出
+`input_tokens_details.cached_tokens` 与 `output_tokens_details.reasoning_tokens`。
+
+**非流式**（`stream:false`）：内部照样走流式上游，网关侧聚合成单个 `response` 对象；
+上游以 error 帧报错时回 **502 + `{"error":…}`**，而不是伪造 `200 + 空 output`。
+
+**错误透传**：chat 链路的错误信封原样透传（状态码、上游原文、`requestId`、
+`gateway_hint` 都不翻译）——翻译成 Responses 错误信封会把排障信息洗掉。
+
+**已知边界（有意为之，不是漏做）**：
+
+- `previous_response_id` / `item_reference` **不支持**，收到即 400 `unsupported_feature`。
+  Codex 默认 `store=false` 且每轮重发全量 `input`，无状态即可满足；静默丢历史会让模型
+  悄悄"失忆"，比明确报错更难排查。
+- `input_file`（file_id 上传）不支持：`input_image` 缺 `image_url` 时点名报错，不猜。
+- 非 function 工具（`web_search` / `file_search` / `computer_use`）会被**剔除**：本网关
+  无法执行它们，保留只会让上游因未知工具类型 400；剔除后纯对话与本地工具仍可用。
+- `include: ["reasoning.encrypted_content"]` 忽略：网关不产出加密推理内容，`reasoning`
+  item 只带 `summary_text` 摘要，不提供可回放的 `encrypted_content`。
+
+**Codex CLI 配置**（`~/.codex/config.toml`）：
+
+```toml
+[model_providers.wb2api]
+name = "WorkBuddy Gateway"
+base_url = "http://<网关地址>:7863/v1"
+env_key = "WB2API_KEY"
+wire_api = "responses"
+```
+
+`WB2API_KEY` 填网关的 `api_key`（未配置 `api_key` 时随意填非空值）。
+
+**curl**：
+
+```bash
+curl -sN http://localhost:7863/v1/responses \
+  -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","input":"你好","stream":true}'
+```
+
 ## Web 管理面板
 
 内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：
@@ -948,6 +1027,7 @@ http://127.0.0.1:7863/panel/
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/responses` | Bearer（`api_key` 非空时） | OpenAI Responses 兼容：流式事件流 / 非流式聚合为单 `response` 对象；`previous_response_id` 等有状态字段明确回 400（见 [Responses 端点](#responses-端点)） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /v1/capacity` | Bearer（`api_key` 非空时） | 按模型查询可用容量：`?model=cn:xxx`（或 `global:xxx`）返回 `model_available_accounts`（该模型可出票账号数）与 `available_accounts`（整池健康账号数）。纯本地台账不打上游；`models.hidden` 点名的模型恒报 0；缺 `model` 返回 400 |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |

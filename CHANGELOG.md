@@ -1,3 +1,32 @@
+## v1.26.0（2026-11-14）
+
+### 新增
+
+- **支持 OpenAI Responses 协议（`POST /v1/responses`）**：Codex CLI 一类只走 Responses 的
+  客户端不再需要前置 new-api 做协议转换。入站请求翻成 chat 请求体后复用同一条主链路——
+  选号、在途租约、token 刷新、错误冷却、会话粘性、前缀缓存、计费、请求日志、工具标记修复
+  全部继承；出站把 chat SSE 逐帧翻成 Responses 事件流（reasoning / message / function_call
+  三类 item，带单调 `sequence_number` 与 usage 映射）。非流式请求在网关侧聚合成单个
+  `response` 对象。`previous_response_id` / `item_reference` / `input_file` 明确回 400
+  `unsupported_feature`；非 function 工具剔除（网关无法执行，保留只会让上游 400）。
+
+### 修复
+
+- **`/v1/responses` 流量进不了账本**：请求日志白名单此前只挂 chat 与搜索，表现为「面板请求
+  记录空白、stdout 无流水行、归档无事件，积分却在掉」。端到端断言钉住 `X-Request-Id`、
+  `path`、`model` 三处，防止回归。
+- **非流式 Responses 请求错误时回 `200 + 错误体`**：`Flush()` 在 net/http 与 httptest 里都会
+  隐式提交 200，翻译层的「延迟判定」被提前破坏，客户端会把错误当成功去解析 `output`。现在
+  只在「已判定 SSE 且客户端确实要流式」时向下 flush，上游 error 帧统一收敛为 502。
+- **chat 侧响应头在翻译层被吞**：429 的 `Retry-After`、SSE 的 `Cache-Control` /
+  `X-Accel-Buffering` 现在回写到真实 writer（`Content-Length` 除外，翻译后长度必变）。
+- **嵌套形态的工具声明写出非法结构**：`{type:function, function:{...}}` 此前只把内层对象塞进
+  `tools[]`，上游按「缺 type 的工具」判 400；现已保留外层包装，回显仍是客户端原形态。
+- **回显字段失真**：`parallel_tool_calls` 不再硬编码 `true`；`text.format` 按客户端原形态回显，
+  不再多包一层 `json_schema`。
+- **已关闭 item 的迟到追加**：`output_item.done` 之后到达的正文/思考另起 item，工具参数丢弃，
+  避免「done 之后还有事件」的错序流让客户端按 `output_index` 归并错乱。
+
 ## v1.25.1（2026-11-12）
 
 ### 修复

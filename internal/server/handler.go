@@ -194,6 +194,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// OpenAI Responses 协议（Codex CLI 等只走这条）：入站翻成 chat 体后复用同一条
+	// 链路，出站把 chat SSE 翻回 Responses 事件流（见 responses.go）。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
@@ -239,14 +242,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // tracedRequest 判断该请求是否需要请求日志记账（指标 + JSONL 归档）。
 //
-// 搜索与 chat 共用同一份账本：搜索同样消耗账号额度、同样会因上游/账号问题失败，
-// 不记账等于在面板「请求记录」里完全看不见搜索流量（此前正是如此——只挂
-// /v1/chat/completions 一个硬编码路径）。
+// chat / responses / 搜索共用同一份账本：三者都消耗账号额度、都会因上游/账号问题
+// 失败。不记账等于在面板「请求记录」与用量统计里完全看不见这类流量——/v1/responses
+// 漏挂时的表现就是「Codex 在跑、面板一片空白、积分却掉了」。
+// 判据是**入站路径**（在 ServeHTTP 入口求值），适配器内部改写后的路径不参与。
 func (h *Handler) tracedRequest(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
-	return r.URL.Path == "/v1/chat/completions" || isSearchPath(r.URL.Path)
+	return r.URL.Path == "/v1/chat/completions" || r.URL.Path == responsesPath || isSearchPath(r.URL.Path)
 }
 
 // isSearchPath 判断是否为搜索端点。
