@@ -2,11 +2,13 @@
 
 ### 优化
 
-- **消除了选号触发的 state.json 写放大**：调度游标（round-robin / sequential 的位置）此前
+- **消除了选号触发的 state.json 写放大 + 崩溃安全网**：调度游标（round-robin / sequential 的位置）此前
   每次选号都置 dirty，有流量时 flusher 每 5 秒重写并 `fsync` 一遍几乎不变的 `state.json`。
   现在游标只作为运行态维护，**停机时由 `flushForce()` 统一落一次**：稳态不再产生任何
   调度相关写盘，重启后仍从下一个号继续（`TestOrderedPersistenceLocalAndSnapshot` 契约不变）。
-  新增 `TestCursorPersistsAtShutdownOnly` 同时钉住「运行期不落盘」与「停机后能续上」两侧。
+  另加 10 分钟检查点（`cursorCheckpointInterval`）：kill -9 / OOM 最多丢 10 分钟轮询进度，
+  不会退回起点。新增 `TestCursorPersistsAtShutdownOnly` 与 `TestCursorCheckpointWritesPeriodically`
+  分别钉住「运行期不落盘 / 停机能续上」和「检查点会写」。
 
 ## v1.27.0（2026-11-14）
 
@@ -17,6 +19,7 @@
   同一个键——第一个用户绑到账号 X 后，第二个用户也被钉在 X 上，缓存、配额与上下文全
   串在一起。现在把 `metadata.user_id`（其次顶层 `user_id`）掺入派生键：不同用户分槽，
   同一用户的同一段对话仍然稳定；两者都没有时键与改动前逐字节相同，老客户端零回归。
+  数字型 `user_id`（部分 SDK 用数字）同样计入，不会被当成「未提供」。
 ### 优化
 
 - **大前缀不再反复全量重算（缓存亲和）**：上游前缀缓存按账号隔离，会话粘性在账号级故障

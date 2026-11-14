@@ -1,9 +1,11 @@
 package pool
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
@@ -68,4 +70,42 @@ func TestCursorPersistsAtShutdownOnly(t *testing.T) {
 	if got := q.PickExcludingForRealm(nil, "m", "cn"); got == nil || got.UID != "a" {
 		t.Fatalf("重启后应续到 a（a→b 之后的下一个），got %v", got)
 	}
+}
+
+// TestCursorCheckpointWritesPeriodically 崩溃安全网：即使没有 Close，检查点也必须把
+// 游标写进 state.json（否则 kill -9 / OOM 后轮询位置退回起点）。
+func TestCursorCheckpointWritesPeriodically(t *testing.T) {
+	old := cursorCheckpointInterval
+	cursorCheckpointInterval = 5 * time.Millisecond
+	defer func() { cursorCheckpointInterval = old }()
+
+	fp := filepath.Join(t.TempDir(), "state.json")
+	p := New(fp)
+	defer p.Close()
+	accounts := []*auth.Auth{{UID: "a"}, {UID: "b"}}
+	p.SyncToDir(accounts)
+	if err := p.SetScheduling(RegionStrategies{Domestic: RoundRobin, International: RoundRobin},
+		RegionAccountOrder{}); err != nil {
+		t.Fatalf("SetScheduling: %v", err)
+	}
+	p.PickExcludingForRealm(nil, "m", "cn") // 推进游标到 a
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(fp); err == nil {
+			var st struct {
+				Scheduling map[string]struct {
+					UID string `json:"uid"`
+				} `json:"scheduling"`
+			}
+			if json.Unmarshal(raw, &st) == nil && len(st.Scheduling) > 0 {
+				for _, c := range st.Scheduling {
+					if c.UID == "a" {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("检查点周期内没有把调度游标写入 state.json")
 }

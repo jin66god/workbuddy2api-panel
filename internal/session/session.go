@@ -14,6 +14,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -473,11 +475,31 @@ func deriveKey(obj map[string]any) string {
 // 都没有返回空串——此时派生键与"不掺入"完全一致，保证老客户端零回归。
 func callerIDOf(obj map[string]any) string {
 	if meta, ok := obj["metadata"].(map[string]any); ok {
-		if v := strOrEmpty(meta["user_id"]); v != "" {
+		if v := scalarID(meta["user_id"]); v != "" {
 			return v
 		}
 	}
-	return strOrEmpty(obj["user_id"])
+	return scalarID(obj["user_id"])
+}
+
+// scalarID 把 user_id 归一成字符串。接受字符串与数字两种形态：经 encoding/json
+// 解出来的数字是 float64，部分 SDK 确实用数字用户 ID；只认字符串会让这些客户端
+// 的派生键退回「不掺入」，重新出现跨用户撞键（这正是本函数要堵的洞）。
+// 其余类型（对象/数组/bool/null）一律视为未提供，不做猜测。
+func scalarID(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case float64:
+		// 整数值按整数输出（12345 而不是 12345.0），保证同一 ID 的键稳定。
+		if t == math.Trunc(t) && math.Abs(t) < 1e15 {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case json.Number:
+		return t.String()
+	}
+	return ""
 }
 
 // DeriveCacheKey 忽略 user_id 闸，强制按对话内容派生键（system + 首条 user 的哈希）。

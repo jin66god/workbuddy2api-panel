@@ -131,10 +131,11 @@ func (p *Pool) Close() {
 	}
 	p.closeOnce.Do(func() {
 		close(p.stopCh)
+		// 停机强制落盘：调度游标运行期不置脏（避免每次选号重写 state.json），
+		// 只在这里写一次，重启后仍能续上 round-robin / sequential 的位置。
+		// 放进 Do 里是为了让重复 Close（defer + 信号路径）只写一次。
+		p.flushForce()
 	})
-	// 停机强制落盘：调度游标运行期不置脏（避免每次选号重写 state.json），
-	// 只在这里写一次，重启后仍能续上 round-robin / sequential 的位置。
-	p.flushForce()
 }
 
 // SetBreaker 注入熔断器参数（main 从 config 解析后调用）。非正值保留原值（用默认）。
