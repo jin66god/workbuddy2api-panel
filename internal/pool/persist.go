@@ -107,10 +107,22 @@ func (p *Pool) startFlusher() {
 	}()
 }
 
-// Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
+// Flush 同步把内存状态落盘（幂等：无变更不写盘）。
 func (p *Pool) Flush() {
+	p.flush(false)
+}
+
+// flushForce 无视 dirty 强制写一次。仅退出时用：调度游标是运行态，为了不产生
+// 「每次选号都重写 state.json」的写放大，运行期不置脏；停机时强制落一次，
+// 保证重启后 round-robin / sequential 从下一个号继续（既有契约）。
+func (p *Pool) flushForce() {
+	p.flush(true)
+}
+
+func (p *Pool) flush(force bool) {
 	p.mu.Lock()
-	if p.dirty.Swap(false) {
+	dirty := p.dirty.Swap(false)
+	if dirty || force {
 		p.saveLocked()
 	}
 	p.mu.Unlock()

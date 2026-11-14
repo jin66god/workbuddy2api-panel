@@ -1,3 +1,13 @@
+## 未发布
+
+### 优化
+
+- **消除了选号触发的 state.json 写放大**：调度游标（round-robin / sequential 的位置）此前
+  每次选号都置 dirty，有流量时 flusher 每 5 秒重写并 `fsync` 一遍几乎不变的 `state.json`。
+  现在游标只作为运行态维护，**停机时由 `flushForce()` 统一落一次**：稳态不再产生任何
+  调度相关写盘，重启后仍从下一个号继续（`TestOrderedPersistenceLocalAndSnapshot` 契约不变）。
+  新增 `TestCursorPersistsAtShutdownOnly` 同时钉住「运行期不落盘」与「停机后能续上」两侧。
+
 ## v1.27.0（2026-11-14）
 
 ### 修复

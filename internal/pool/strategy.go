@@ -66,8 +66,8 @@ func (p *Pool) SetScheduling(s RegionStrategies, order RegionAccountOrder) error
 	for key, cursor := range p.scheduling {
 		realm, _, _ := strings.Cut(key, "\x1f")
 		if cursor.Strategy != p.strategyForRealmLocked(realm) {
+			// 游标只在停机时统一落盘（见 flushForce），这里不置脏。
 			delete(p.scheduling, key)
-			p.dirty.Store(true)
 		}
 	}
 	return nil
@@ -166,8 +166,9 @@ func (p *Pool) pickOrderedLocked(cands []*entry, tried map[string]bool, model, r
 		}
 	}
 	if advance && cursor.UID != selected.a.UID {
+		// 运行期游标不置脏：有流量时每次选号都置脏会让 flusher 每 5 秒重写并 fsync
+		// 一遍内容几乎不变的 state.json。停机由 flushForce 落一次，重启仍能续上。
 		p.scheduling[key] = scheduleCursor{Strategy: strategy, UID: selected.a.UID}
-		p.dirty.Store(true)
 	}
 	return selected
 }
