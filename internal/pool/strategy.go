@@ -66,8 +66,8 @@ func (p *Pool) SetScheduling(s RegionStrategies, order RegionAccountOrder) error
 	for key, cursor := range p.scheduling {
 		realm, _, _ := strings.Cut(key, "\x1f")
 		if cursor.Strategy != p.strategyForRealmLocked(realm) {
+			// 游标是运行态（不进 state.json），删掉过期游标无需落盘。
 			delete(p.scheduling, key)
-			p.dirty.Store(true)
 		}
 	}
 	return nil
@@ -166,8 +166,9 @@ func (p *Pool) pickOrderedLocked(cands []*entry, tried map[string]bool, model, r
 		}
 	}
 	if advance && cursor.UID != selected.a.UID {
+		// 游标只影响「下一个选谁」，不进 state.json：写它会让 flusher 在每次选号后
+		// 重写并 fsync 一遍内容未变的 state.json（有流量时每 5 秒一次写放大）。
 		p.scheduling[key] = scheduleCursor{Strategy: strategy, UID: selected.a.UID}
-		p.dirty.Store(true)
 	}
 	return selected
 }
