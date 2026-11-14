@@ -176,6 +176,9 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// cacheAff 会话级缓存亲和（cache_affinity.go）：粘性解绑后优先回到缓存还热着
+	// 的那个号，避免几十万 token 前缀重算。仅在无粘性绑定时提供候选。
+	cacheAff *cacheAffinity
 }
 
 // NewHandler 构建 handler。
@@ -192,7 +195,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), cacheAff: newCacheAffinity(cacheAffinityTTL, cacheAffinityMax)}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// OpenAI Responses 协议（Codex CLI 等只走这条）：入站翻成 chat 体后复用同一条
 	// 链路，出站把 chat SSE 翻回 Responses 事件流（见 responses.go）。
@@ -784,6 +787,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			resolve = h.cfg.Session.LookupForModel
 		}
 		if uid, ok := resolve(bindKey, peek.Model); ok {
+			stickyUID = uid
+		}
+	}
+	// 缓存亲和兜底：粘性没有绑定（首次 / 上一轮因账号故障解绑）时，优先回到该会话
+	// 上次吃到前缀缓存的号。命中率按账号隔离，换号等于把几十万 token 前缀全部重算。
+	// 这里只填候选：号不可用时下面 PickByUIDForModel 返回 nil → 解绑 → 普通轮换，
+	// 既有选号语义完全不变。
+	if stickyUID == "" && bindKey != "" {
+		if uid := h.cacheAff.recall(bindKey); uid != "" {
 			stickyUID = uid
 		}
 	}
@@ -1522,6 +1534,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// WARN 信号放 recordAttempt 之后：st.promptTokens 此时才是本次的观测值。
 			if st.hasCache {
 				cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
+				h.noteCacheAffinity(bindKey, acct.UID, st.hasCache, st.promptTokens, st.cacheHit)
 			}
 			if n := repair.Converted(); n > 0 {
 				// 修复命中：上游本来会把工具调用吐成正文标记，这里已还原成 tool_calls。
@@ -1610,6 +1623,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
+			h.noteCacheAffinity(bindKey, acct.UID, st.hasCache, st.promptTokens, st.cacheHit)
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
