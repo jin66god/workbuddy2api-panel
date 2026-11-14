@@ -296,8 +296,7 @@ func (p *Pool) notePersistFail(err error) {
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。
 func (p *Pool) stateOverviewLocked() stateFile {
 	now := time.Now()
-	// Scheduling 是运行态（进程内游标），刻意不落盘：见 strategy.go 的选号注释。
-	sf := stateFile{Accounts: map[string]stateAccount{}}
+	sf := stateFile{Accounts: map[string]stateAccount{}, Scheduling: p.scheduling}
 	for uid, e := range p.byUID {
 		s := stateAccount{
 			Credits:                  e.credits,
