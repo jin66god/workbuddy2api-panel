@@ -196,20 +196,24 @@ func TestTaskSweepIdempotent(t *testing.T) {
 	}
 }
 
-// TestTaskSweepSkipsGlobalAndEnterprise global / 企业版账号无个人成长体系：
-// 零上游请求（与任务中心扫描同一门控）。
-func TestTaskSweepSkipsGlobalAndEnterprise(t *testing.T) {
-	b := &sweepBackend{}
-	p := newSweepPanel(t, b,
-		&auth.Auth{UID: "g1", AccessToken: "at", Domain: "www.workbuddy.ai"},
-		&auth.Auth{UID: "e1", AccessToken: "at", EnterpriseID: "ent-1"},
-	)
-	st := p.RunTaskSweepOnce()
-	if st.Accounts != 0 || st.Errors != 0 || st.Claimed != 0 {
-		t.Errorf("stats = %+v, want 全零", st)
+// TestTaskSweepSkipsEnterpriseButProcessesGlobal 企业版仍零上游请求；
+// 国际版个人号已纳入成长任务体系，必须真实扫描（不再被 IsGlobal 提前跳过）。
+func TestTaskSweepSkipsEnterpriseButProcessesGlobal(t *testing.T) {
+	eb := &sweepBackend{}
+	pe := newSweepPanel(t, eb, &auth.Auth{UID: "e1", AccessToken: "at", EnterpriseID: "ent-1"})
+	pe.RunTaskSweepOnce()
+	if got := eb.reqs.Load(); got != 0 {
+		t.Fatalf("企业版账号不应产生任何上游请求，got %d", got)
 	}
-	if got := b.reqs.Load(); got != 0 {
-		t.Fatalf("global/企业版账号不应产生任何上游请求，got %d", got)
+
+	gb := &sweepBackend{}
+	pg := newSweepPanel(t, gb, &auth.Auth{UID: "g1", AccessToken: "at", Domain: "www.workbuddy.ai"})
+	st := pg.RunTaskSweepOnce()
+	if st.Errors != 0 {
+		t.Errorf("global sweep errors = %d, want 0", st.Errors)
+	}
+	if got := gb.reqs.Load(); got == 0 {
+		t.Fatalf("国际版个人号应参与任务补领扫描，got 0 upstream requests")
 	}
 }
 

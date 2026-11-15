@@ -180,6 +180,31 @@ var autoActions = []autoAction{
 		Desc:     "体验灵感功能（预留，疑 PC 口径 +500c+5e）：accept → 灵感事件组（PC+mp 双形态）→ 领奖（判据待解锁验证）",
 		run:      runSequentialPlaybook,
 	},
+
+	// ── 国际版（global）任务：事件链路与国内版一致，仅任务 code 不同 ──
+	// 国际版成长任务下发的是 first_chat / skill_installed / template_used / expert_summoned，
+	// 国内版 run* 内部按 chat_5 / skill_1 等 code 查进度会报「任务不存在」，因此单列动作。
+	// 底层事件上报（对话 / 技能 / 模板 / 专家）按账号 realm 自适应，不需要另写一套。
+	{
+		TaskCode: "first_chat",
+		Desc:     "国际版：完成至少一次对话（对话活跃上报，自动补差额）",
+		run:      runGlobalChat,
+	},
+	{
+		TaskCode: "skill_installed",
+		Desc:     "国际版：安装至少一个技能（skill_info 事件）",
+		run:      runGlobalSkill,
+	},
+	{
+		TaskCode: "template_used",
+		Desc:     "国际版：使用一次模板（template_used 事件组）",
+		run:      runGlobalTemplate,
+	},
+	{
+		TaskCode: "expert_summoned",
+		Desc:     "国际版：召唤并完成一次专家交互（召唤 + 使用链）",
+		run:      runGlobalExpert,
+	},
 }
 
 // autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
@@ -1239,6 +1264,72 @@ const expertSummonGap = 6 * time.Second
 // 自造专家 id 或自造 requestId 均不计数。
 func runExpertUse(p *Panel, a *auth.Auth) (string, error) {
 	return runExpertBatch(p, a, "agent", 5)
+}
+
+// ---------------------------------------------------------------------------
+// 国际版（global）任务动作。
+//
+// 国际版与国内版的成长任务体系共用同一套行为事件接口，但任务 code 不同：
+// first_chat / skill_installed / template_used / expert_summoned。下面的函数只做
+// 「按国际版 code 确认任务存在并补差额」，事件链路全部复用国内版已验证的实现。
+// ---------------------------------------------------------------------------
+
+// runGlobalChat 完成国际版 first_chat（完成至少一次对话）。
+func runGlobalChat(p *Panel, a *auth.Auth) (string, error) {
+	t, err := p.taskByCode(a, "first_chat")
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	target := t.Target
+	if target <= 0 {
+		target = 1
+	}
+	need := target - t.Current
+	if need <= 0 {
+		return "进度已达标，无需上报", nil
+	}
+	for i := int64(0); i < need; i++ {
+		if err := p.cfg.Upstream.ReportChatActivity(a, upstream.OfficialConversationID(), ""); err != nil {
+			return "", fmt.Errorf("上报第 %d/%d 条对话失败: %w", i+1, need, err)
+		}
+		if i < need-1 {
+			time.Sleep(reportGap)
+		}
+	}
+	return fmt.Sprintf("已补报 %d 条对话事件（国际版 first_chat）", need), nil
+}
+
+// runGlobalSkill 完成国际版 skill_installed：判据同为 skill_info 事件。
+func runGlobalSkill(p *Panel, a *auth.Auth) (string, error) {
+	if t, err := p.taskByCode(a, "skill_installed"); err != nil {
+		return "", err
+	} else if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	return runSkillFresh(p, a)
+}
+
+// runGlobalTemplate 完成国际版 template_used：判据同为 template_used 事件组。
+func runGlobalTemplate(p *Panel, a *auth.Auth) (string, error) {
+	if t, err := p.taskByCode(a, "template_used"); err != nil {
+		return "", err
+	} else if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	return runTemplateUse(p, a)
+}
+
+// runGlobalExpert 完成国际版 expert_summoned：判据同为召唤 + 实际使用事件。
+func runGlobalExpert(p *Panel, a *auth.Auth) (string, error) {
+	if t, err := p.taskByCode(a, "expert_summoned"); err != nil {
+		return "", err
+	} else if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	return runExpertUse(p, a)
 }
 
 // runExpertTeamUse 完成 Expert_team_use_3（使用 3 个专家团，expertType=team）。
