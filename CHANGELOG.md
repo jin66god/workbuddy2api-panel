@@ -9,6 +9,9 @@
 
 ### 修复
 
+- **停机时等待后台落盘 goroutine 真正退出**：`Close()` 关闭 flusher 后立即返回，而周期检查点
+  可能仍在写 `state.json` 的临时文件；进程退出或测试清理目录时会与之并发（表现为
+  `TempDir cleanup: directory not empty`）。现在 Close 等 goroutine 退出后再返回。
 - **领奖返回 0 积分/0 能量时不再直接报「已领取」**：领取请求返回 200 只代表被接受，服务端可能
   尚未写入 `claimed`。现在回读任务状态（默认口径 + 小程序口径）确认后再给结论：已领取 →
   `already_claimed`；已提交但状态未更新 → `credited=false` 并提示稍后重试；读取失败 → 明确返回

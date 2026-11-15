@@ -90,7 +90,10 @@ type Pool struct {
 	egress map[string]egressStat
 	// stopCh 关闭信号：Close 关闭它使 startFlusher 的后台 goroutine 退出。
 	// nil = 未启动 flusher（stateFp 为空时 New 不起 flusher）。
-	stopCh chan struct{}
+	// flusherDone 在 goroutine 真正退出时关闭：Close 必须等它，否则停机/测试清理
+	// 目录时后台检查点可能还在写 tmp 文件（TempDir cleanup: directory not empty）。
+	stopCh      chan struct{}
+	flusherDone chan struct{}
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
 	closeOnce sync.Once
 }
@@ -135,6 +138,11 @@ func (p *Pool) Close() {
 		// 只在这里写一次，重启后仍能续上 round-robin / sequential 的位置。
 		// 放进 Do 里是为了让重复 Close（defer + 信号路径）只写一次。
 		p.flushForce()
+		// 等后台 goroutine 真正退出再返回：它可能正在执行检查点写盘，提前返回会让
+		// 调用方（进程退出 / 测试 TempDir 清理）与写盘并发。
+		if p.flusherDone != nil {
+			<-p.flusherDone
+		}
 	})
 }
 

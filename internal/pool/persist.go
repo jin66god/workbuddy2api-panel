@@ -89,15 +89,18 @@ var cursorCheckpointInterval = 10 * time.Minute
 
 func (p *Pool) startFlusher() {
 	stopCh := make(chan struct{})
+	done := make(chan struct{})
 	// 在启动 goroutine 前同步写入（避免与测试对 flushInterval 的恢复写竞争）；
 	// stopCh 同步登记，Close 才能可靠停止（New 与 startFlusher 之间无并发窗口）。
 	p.stopCh = stopCh
+	p.flusherDone = done
 	interval := flushInterval
 	// 游标检查点：调度游标运行期不置脏（否则每次选号都触发写盘），但完全不写会让
 	// kill -9 / OOM 后的轮询位置退回起点。用独立慢周期兜底：默认 10 分钟强制落一次，
 	// 写放大从「每 5 秒」降到「每 10 分钟」，崩溃最多丢这么多轮询进度。
 	cursorChk := time.NewTicker(cursorCheckpointInterval)
 	go func() {
+		defer close(done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		defer cursorChk.Stop()
