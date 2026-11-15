@@ -209,7 +209,19 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 
 // AcceptTasks 接受任务（幂等：已 accepted 时上游返回成功或业务提示，均不视为致命错误）。
 func (c *Client) AcceptTasks(a *auth.Auth, taskCodes []string) error {
-	_, err := c.growthJSON(a, http.MethodPost, tasksAcceptPath, map[string]any{"task_codes": taskCodes})
+	raw, err := json.Marshal(map[string]any{"task_codes": taskCodes})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.chatBase(a)+tasksAcceptPath, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	c.BillingHeaders(req, a)
+	// Web 成长中心的报名请求带 x-client-platform: web。缺这个头时服务端可能回
+	// code=0 但不落库，表现为「点全部接受有成功提示、列表仍全是未接受」。
+	req.Header.Set("x-client-platform", "web")
+	_, err = c.doJSON(req)
 	return err
 }
 

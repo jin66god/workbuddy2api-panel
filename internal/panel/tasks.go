@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // acceptBatchGap 批量接受的批间节流（对齐脚本 1.05s 口径，避免上游风控）。
@@ -78,8 +80,20 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "accept: "+err.Error())
 		return
 	}
-	log.Printf("panel: 接受任务 uid=%s codes=%v", uid, body.TaskCodes)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// 回读确认：接口成功不代表状态落库（历史上出现过「提示已接受、列表仍未接受」）。
+	verified := p.acceptedTaskCodes(a)
+	var unverified []string
+	for _, code := range body.TaskCodes {
+		if !verified[code] {
+			unverified = append(unverified, code)
+		}
+	}
+	log.Printf("panel: 接受任务 uid=%s codes=%v 未变化=%v", uid, body.TaskCodes, unverified)
+	resp := map[string]any{"ok": true, "accepted": len(body.TaskCodes) - len(unverified), "unverified": unverified}
+	if len(unverified) > 0 {
+		resp["message"] = "平台返回成功，但部分任务状态未变为已接受，请重试"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // taskAcceptAll 接受该账号全部尚未接受的任务（跳过已 accepted/claimed 的）。
@@ -117,7 +131,12 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const batch = 20
-	accepted := 0
+	// 以「请求过的 code」为基准做回读核对：POST 成功只说明接口收了，不代表状态落库。
+	requested := append([]string(nil), codes...)
+	seenDefault := make(map[string]bool, len(codes))
+	for _, c := range codes {
+		seenDefault[c] = true
+	}
 	var failed []string
 	for i := 0; i < len(codes); i += batch {
 		end := i + batch
@@ -129,13 +148,17 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			failed = append(failed, codes[i:end]...)
 			continue
 		}
-		accepted += end - i
 		time.Sleep(acceptBatchGap) // 批间节流（对齐脚本 1.05s 口径）
 	}
 	// 小程序口径任务单独批量接受（默认列表不含 mp 码，accept 也要求 mp 头）。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
 		var mpCodes []string
 		for _, t := range mpTasks {
+			// mp 列表是默认口径的超集：默认列表里已处理的 code 不再用 mp 头重复
+			// 报一遍（重复报名既多打请求，也可能把状态冲回未接受）。
+			if seenDefault[t.TaskCode] {
+				continue
+			}
 			if t.Claimed || t.Locked || t.AcceptStatus == "accepted" || t.AcceptStatus == "completed" {
 				continue
 			}
@@ -146,15 +169,34 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 				log.Printf("panel: mp 批量接受失败 uid=%s err=%v", uid, err)
 				failed = append(failed, mpCodes...)
 			} else {
-				accepted += len(mpCodes)
 				time.Sleep(acceptBatchGap)
 			}
 		}
 	}
-	log.Printf("panel: 全部接受 uid=%s 接受=%d 失败=%d", uid, accepted, len(failed))
-	resp := map[string]any{"ok": true, "accepted": accepted, "failed": failed}
-	if len(failed) > 0 {
-		resp["message"] = "部分任务接受失败（上游拒绝），可重试"
+	// 回读确认：逐个核对任务是否真的进入已接受/已完成状态。
+	verified := p.acceptedTaskCodes(a)
+	accepted := 0
+	var unverified []string
+	for _, code := range requested {
+		if verified[code] {
+			accepted++
+		} else {
+			unverified = append(unverified, code)
+		}
+	}
+	log.Printf("panel: 全部接受 uid=%s 请求=%d 实际接受=%d 未变化=%d 失败=%d",
+		uid, len(requested), accepted, len(unverified), len(failed))
+	resp := map[string]any{
+		"ok": true, "requested": len(requested), "accepted": accepted,
+		"failed": failed, "unverified": unverified,
+	}
+	switch {
+	case len(failed) > 0:
+		resp["message"] = "部分任务接受失败（接口报错），可重试"
+	case accepted == 0:
+		resp["message"] = "平台返回成功，但任务状态未变为已接受（可能未真正报名），请重试"
+	case len(unverified) > 0:
+		resp["message"] = "部分任务状态未变为已接受，可重试"
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -211,6 +253,26 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("panel: 领取任务奖励 uid=%s code=%s +%d分 +%d能", uid, body.TaskCode, credit, energy)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credit": credit, "energy": energy})
+}
+
+// acceptedTaskCodes 回读默认口径 + 小程序口径，返回已接受/已完成/已领取的任务 code。
+// 用于「全部接受」后的真实性校验：接口回 200 不等于是真的报名成功。
+func (p *Panel) acceptedTaskCodes(a *auth.Auth) map[string]bool {
+	out := map[string]bool{}
+	collect := func(tasks []upstream.Task) {
+		for _, t := range tasks {
+			if t.Claimed || strings.EqualFold(t.AcceptStatus, "accepted") || strings.EqualFold(t.AcceptStatus, "completed") {
+				out[t.TaskCode] = true
+			}
+		}
+	}
+	if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
+		collect(tasks)
+	}
+	if tasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+		collect(tasks)
+	}
+	return out
 }
 
 // taskClaimedAfterClaim 领取后回读任务状态，确认是否真的标记为已领取。
