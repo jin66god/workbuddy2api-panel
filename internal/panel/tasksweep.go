@@ -52,7 +52,7 @@ func (p *Panel) RunTaskSweepOnce() TaskSweepStats {
 			continue // 禁用账号不参与（与任务中心扫描同口径）
 		}
 		a := p.cfg.Pool.AuthByUID(ps.UID)
-		if a == nil || a.IsEnterprise() {
+		if a == nil || a.IsGlobal() || a.IsEnterprise() {
 			continue // 无个人成长体系：零上游请求
 		}
 		wg.Add(1)

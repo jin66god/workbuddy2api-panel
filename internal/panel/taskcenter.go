@@ -73,6 +73,10 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 			}
 			it := &items[i]
 			it.UID, it.Nickname = uid, a.Nickname
+			// 国际版没有成长任务活动：列表只是模板，报名不生效，扫描不发起任何请求。
+			if a.IsGlobal() {
+				return
+			}
 			// 企业版与静态 API Key 账号门控：二者无个人成长体系
 			// （GET /v2/activity/growth/tasks 上游 403「growth system is only available
 			// for personal users」）。企业形态只看 enterpriseId（token_source 不参与，issue #4），
@@ -216,6 +220,10 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 		go func(a *auth.Auth) {
 			defer wg.Done()
 			one := queueAccount{a: a}
+			// 国际版没有成长任务活动：不入队，避免白跑动作。
+			if a.IsGlobal() {
+				return
+			}
 			// 无个人成长体系账号门控（企业版 / 静态 API Key）：行为事件会被上游
 			// 直接 403，入队只会白耗真实对话配额，故不入队并记录可定位的跳过原因
 			// （见 auth.SupportsPersonalGrowth；不按 token_source 门控，issue #4）。

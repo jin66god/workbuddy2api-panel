@@ -368,6 +368,9 @@ func (p *Panel) listTasksSoftRate(a *auth.Auth, mp bool) ([]upstream.Task, error
 // runAutoAction 执行一个任务动作；撞 429 时等窗口重发一次（429 表示请求根本没被
 // 执行，任务动作幂等，重发不加重）。
 func (p *Panel) runAutoAction(a *auth.Auth, act *autoAction) (string, error) {
+	if a != nil && a.IsGlobal() {
+		return "", fmt.Errorf("国际版暂无成长任务活动")
+	}
 	msg, err := act.run(p, a)
 	if err != nil && isSoftRateErr(err) {
 		d := softRateWait(err, 1)
@@ -1398,6 +1401,9 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // 流程：先把所有未接受的任务批量 accept（规范状态机；上游脚本建议"先 accept"），
 // 再逐项执行行为链路。accept 不是进度产生的必要条件，但让后续状态流转规范。
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
+	if a != nil && a.IsGlobal() {
+		return []map[string]any{{"task_code": "(全部)", "status": "skipped", "message": "国际版暂无成长任务活动"}}
+	}
 	// 兜底门控：企业版 / 静态 API Key 无个人成长体系（行为事件上游直接 403）。
 	// HTTP 入口已拒绝，但队列与未来新增的内部调用也必须零上游请求——这里再挡一次，
 	// 避免拿着真实对话配额空跑。

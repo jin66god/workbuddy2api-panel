@@ -40,6 +40,15 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系")
 		return
 	}
+	// 国际版没有成长任务活动：列表接口会回一份模板任务，但报名/领奖都不生效，
+	// 网页端也没有入口。这里直接返回空列表，避免面板显示一排点了没用的「接受」。
+	if a.IsGlobal() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "realm": "global", "tasks": []any{}, "readonly": true,
+			"message": "国际版暂无成长任务活动",
+		})
+		return
+	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
@@ -67,6 +76,10 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if a.IsGlobal() {
+		writeErr(w, http.StatusUnprocessableEntity, "国际版暂无成长任务活动")
 		return
 	}
 	var body struct {
@@ -108,6 +121,10 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if a.IsGlobal() {
+		writeErr(w, http.StatusUnprocessableEntity, "国际版暂无成长任务活动")
 		return
 	}
 	// 静态 API Key 账号无成长任务体系：明确拒绝（不静默空跑）。
@@ -211,6 +228,10 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if a.IsGlobal() {
+		writeErr(w, http.StatusUnprocessableEntity, "国际版暂无成长任务活动")
 		return
 	}
 	var body struct {
