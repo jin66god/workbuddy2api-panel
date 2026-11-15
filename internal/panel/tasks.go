@@ -186,10 +186,59 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if credit == 0 && energy == 0 {
-		log.Printf("panel: 领取任务奖励 uid=%s code=%s（已领取过，无新增）", uid, body.TaskCode)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already_claimed": true, "message": "该奖励此前已领取"})
+		// 领取接口返回 200 只代表请求被接受，不等于积分入账：先回读任务状态再下结论。
+		// 旧实现把 0/0 一律当成「此前已领」，会在「已提交但未入账」时误报成功。
+		claimed, verifyErr := p.taskClaimedAfterClaim(a, body.TaskCode)
+		if verifyErr != nil {
+			log.Printf("panel: 领取任务奖励 uid=%s code=%s 已提交，但回读状态失败: %v", uid, body.TaskCode, verifyErr)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": true, "credited": false, "verified": false,
+				"message": "领取请求已提交，但读取任务状态失败，暂无法确认是否到账",
+			})
+			return
+		}
+		if claimed {
+			log.Printf("panel: 领取任务奖励 uid=%s code=%s（已领取过，无新增）", uid, body.TaskCode)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already_claimed": true, "message": "该奖励此前已领取"})
+			return
+		}
+		log.Printf("panel: 领取任务奖励 uid=%s code=%s 上游已接受但任务状态未变为已领取", uid, body.TaskCode)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "credited": false, "verified": true,
+			"message": "领取请求已提交，但任务状态未更新（未确认到账），请稍后刷新后重试",
+		})
 		return
 	}
 	log.Printf("panel: 领取任务奖励 uid=%s code=%s +%d分 +%d能", uid, body.TaskCode, credit, energy)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credit": credit, "energy": energy})
+}
+
+// taskClaimedAfterClaim 领取后回读任务状态，确认是否真的标记为已领取。
+//
+// 先查默认口径，再查小程序口径（部分任务只在 mp 头列表下发）。任务在两边都
+// 不存在时返回 (false, nil)：调用方按「未确认入账」处理，而不是当成已领取。
+func (p *Panel) taskClaimedAfterClaim(a *auth.Auth, code string) (bool, error) {
+	tasks, err := p.cfg.Upstream.ListTasks(a)
+	if err == nil {
+		for _, t := range tasks {
+			if t.TaskCode == code {
+				return t.Claimed, nil
+			}
+		}
+	}
+	mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a)
+	if mpErr == nil {
+		for _, t := range mpTasks {
+			if t.TaskCode == code {
+				return t.Claimed, nil
+			}
+		}
+	}
+	if err != nil {
+		return false, err
+	}
+	if mpErr != nil {
+		return false, mpErr
+	}
+	return false, nil
 }
