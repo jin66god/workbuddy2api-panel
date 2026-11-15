@@ -22,3 +22,17 @@ func TestGlobalTaskActionsRegistered(t *testing.T) {
 		t.Fatalf("domestic action chat_5 missing after adding global actions")
 	}
 }
+
+// 域过滤依赖这张判据：漏一个 code 就会让国际版账号的一键完成把国内动作也跑一遍。
+func TestIsGlobalTaskCode(t *testing.T) {
+	for _, code := range []string{"first_chat", "skill_installed", "template_used", "expert_summoned"} {
+		if !isGlobalTaskCode(code) {
+			t.Errorf("isGlobalTaskCode(%q) = false, want true", code)
+		}
+	}
+	for _, code := range []string{"chat_5", "skill_1", "template_5", "expert_5", ""} {
+		if isGlobalTaskCode(code) {
+			t.Errorf("isGlobalTaskCode(%q) = true, want false", code)
+		}
+	}
+}

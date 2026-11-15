@@ -217,6 +217,15 @@ func autoActionFor(code string) *autoAction {
 	return nil
 }
 
+// isGlobalTaskCode 国际版成长任务的 code（与国内版互不相交）。
+func isGlobalTaskCode(code string) bool {
+	switch code {
+	case "first_chat", "skill_installed", "template_used", "expert_summoned":
+		return true
+	}
+	return false
+}
+
 // autoActionIndex 任务在 autoActions 中的顺序（队列执行按依赖序排；未知返回大值）。
 func autoActionIndex(code string) int {
 	for i := range autoActions {
@@ -1467,6 +1476,11 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	}
 
 	for _, act := range autoActions {
+		// 域过滤：国际版与国内版的任务 code 互不相交，跨域动作既不查询也不输出
+		// skipped 行，避免一键完成列表里出现一整排「该账号没有此任务」的噪声。
+		if isGlobalTaskCode(act.TaskCode) != a.IsGlobal() {
+			continue
+		}
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
 		// 本账号没有这个任务就跳过：不查询、不执行、不上报。
 		// 上游已下架的 4 个 code（Model_chat_GLM5.2 / Buddy_App_QQ / create_canvas /
