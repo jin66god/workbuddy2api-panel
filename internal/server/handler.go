@@ -176,6 +176,9 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// restrict 上游封号潮的按域暂停闸门（restrict.go）：短窗内多个不同账号被
+	// 11140 限制 → 暂停该域派发，避免轮转把剩余健康号逐个撞死。
+	restrict restrictionGate
 	// cacheAff 会话级缓存亲和（cache_affinity.go）：粘性解绑后优先回到缓存还热着
 	// 的那个号，避免几十万 token 前缀重算。仅在无粘性绑定时提供候选。
 	cacheAff *cacheAffinity
@@ -1103,6 +1106,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		heldUID = acct.UID
 
+		// 上游封号潮闸门：该域正在被成批限制时，拿到号也不要发请求（换号只会
+		// 把同一个限制重复撞一遍）。fail 释放租约，带 Retry-After 让客户端稍后重试。
+		if until, paused := h.restrict.paused(acct.Realm(), time.Now()); paused {
+			fail(acct.UID)
+			st.status = http.StatusServiceUnavailable
+			// Retry-After 用真实剩余时长（至少 5 秒），避免客户端按固定 30s 反复撞门。
+			retryAfter := int(time.Until(until).Seconds())
+			if retryAfter < 5 {
+				retryAfter = 5
+			}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+			lastErr = fmt.Errorf("%w (realm=%s until=%s)", errRestrictionPause, acct.Realm(), until.Format(time.RFC3339))
+			log.Printf("WARN: [server] dispatch paused realm=%q until=%s (upstream restriction wave), fail fast",
+				acct.Realm(), until.Format(time.RFC3339))
+			break
+		}
+
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
@@ -1672,6 +1692,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		code = "client_deadline_exceeded"
 		msg = "request deadline is nearly exhausted (client timeout): no budget left for another upstream attempt; raise the client timeout and retry"
 	}
+	// 封号潮暂停：不是账号池耗尽，明确告知客户端是上游在成批限制、稍后重试。
+	if errors.Is(lastErr, errRestrictionPause) {
+		status = http.StatusServiceUnavailable
+		code = "upstream_restriction_wave"
+		msg = "upstream is restricting accounts in batches; dispatch paused for this realm, please retry later"
+	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）走 noHealthyHint —— 裸名落错域时改写成带前缀的指引。
 	hint := h.noHealthyHint(peek.Model, realm, bareModel)
@@ -2078,6 +2104,17 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 11-128（通道校验失败）已在 Classify 分流为 ErrChannelRefused，走不到这里。
 		if upstream.IsAccountRestricted(body) {
+			// 连坐判定：同一 realm 短窗内多个不同账号被限制 → 暂停该域派发。
+			// 阈值随本域可用号数缩放，避免小池子过早停派、大池子过晚止损。
+			realm, healthy := "", 0
+			if a := h.cfg.Pool.AuthByUID(uid); a != nil {
+				realm = a.Realm()
+				_, healthy, _, _, _ = h.cfg.Pool.CountsDetailedForRealm(realm)
+			}
+			if pause := h.restrict.note(realm, uid, healthy, time.Now()); pause > 0 {
+				log.Printf("WARN: [server] upstream restriction wave realm=%q: dispatch paused %s (threshold %d, %d healthy)",
+					realm, pause, restrictionThreshold(healthy), healthy)
+			}
 			if h.cfg.Pool.NoteAccountRestricted(uid) {
 				log.Printf("WARN: [server] 账号 %s 连续 %d 次 11140 账号限制 → 禁用（需在 WorkBuddy 提交反馈申诉）",
 					logfmt.Label(uid, ""), pool.AccountRestrictedThreshold())
