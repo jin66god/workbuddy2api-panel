@@ -82,10 +82,12 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	}
 	// 回读确认：接口成功不代表状态落库（历史上出现过「提示已接受、列表仍未接受」）。
 	verified := p.acceptedTaskCodes(a)
-	var unverified []string
-	for _, code := range body.TaskCodes {
-		if !verified[code] {
-			unverified = append(unverified, code)
+	_, unverified := countAccepted(body.TaskCodes, verified)
+	if len(unverified) > 0 {
+		if err := p.cfg.Upstream.AcceptTasksWeb(a, unverified); err == nil {
+			time.Sleep(400 * time.Millisecond)
+			verified = p.acceptedTaskCodes(a)
+			_, unverified = countAccepted(body.TaskCodes, verified)
 		}
 	}
 	log.Printf("panel: 接受任务 uid=%s codes=%v 未变化=%v", uid, body.TaskCodes, unverified)
@@ -175,13 +177,16 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	}
 	// 回读确认：逐个核对任务是否真的进入已接受/已完成状态。
 	verified := p.acceptedTaskCodes(a)
-	accepted := 0
-	var unverified []string
-	for _, code := range requested {
-		if verified[code] {
-			accepted++
+	accepted, unverified := countAccepted(requested, verified)
+	if len(unverified) > 0 {
+		// chatBase 的 /v2 批量接口可能回 code=0 但不落库；改用 Web 成长中心口径
+		// （webBase + /activity/...，带 Origin/Referer）重试未生效的 code，再回读一次。
+		if err := p.cfg.Upstream.AcceptTasksWeb(a, unverified); err != nil {
+			log.Printf("panel: Web 口径补报名失败 uid=%s codes=%v err=%v", uid, unverified, err)
 		} else {
-			unverified = append(unverified, code)
+			time.Sleep(400 * time.Millisecond)
+			verified = p.acceptedTaskCodes(a)
+			accepted, unverified = countAccepted(requested, verified)
 		}
 	}
 	log.Printf("panel: 全部接受 uid=%s 请求=%d 实际接受=%d 未变化=%d 失败=%d",
@@ -253,6 +258,20 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("panel: 领取任务奖励 uid=%s code=%s +%d分 +%d能", uid, body.TaskCode, credit, energy)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credit": credit, "energy": energy})
+}
+
+// countAccepted 按请求过的 code 统计「真的已接受」的数量与未变化列表。
+func countAccepted(codes []string, verified map[string]bool) (int, []string) {
+	accepted := 0
+	var unverified []string
+	for _, code := range codes {
+		if verified[code] {
+			accepted++
+		} else {
+			unverified = append(unverified, code)
+		}
+	}
+	return accepted, unverified
 }
 
 // acceptedTaskCodes 回读默认口径 + 小程序口径，返回已接受/已完成/已领取的任务 code。

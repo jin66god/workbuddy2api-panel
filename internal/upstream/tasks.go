@@ -225,6 +225,36 @@ func (c *Client) AcceptTasks(a *auth.Auth, taskCodes []string) error {
 	return err
 }
 
+// AcceptTasksWeb 走 Web 成长中心口径报名：webBase + /activity/growth/tasks/accept，
+// 带 Origin/Referer 与 x-client-platform: web。国内号走 chatBase 的 /v2 路径，
+// 国际号的 Web 成长中心实际走这条（与领奖端点同源），批量接口在 /v2 下可能
+// 回 code=0 但不落库，故作为校验失败后的兜底重试。
+func (c *Client) AcceptTasksWeb(a *auth.Auth, taskCodes []string) error {
+	raw, err := json.Marshal(map[string]any{"task_codes": taskCodes})
+	if err != nil {
+		return err
+	}
+	base := c.webBase(a)
+	req, err := http.NewRequest(http.MethodPost, base+"/activity/growth/tasks/accept", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", base)
+	req.Header.Set("Referer", base+"/profile/growth-center")
+	req.Header.Set("x-client-platform", "web")
+	if ua := c.userAgent(a); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	if a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
+	}
+	_, err = c.doJSON(req)
+	return err
+}
+
 // ClaimReward 领取单个任务奖励。
 //
 // 端点来源（实测）：Web 成长中心的领奖请求 ——
