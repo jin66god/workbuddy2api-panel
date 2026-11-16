@@ -355,7 +355,43 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"global": countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("global")),
 		},
 		"sticky_sessions": sticky,
-		"redis_mode":      redisMode,
+		// credits 顶层积分汇总：把「可用量」直接摊到接口根部，外部集成（面板 /
+		// 费用插件）不必自己遍历 accounts 再求和——那种做法每个消费方都要重复实现，
+		// 且极易漏掉「禁用号的 credits 已是 0、credits_raw 是冻结快照」的语义差别。
+		//
+		// available = 健康/冷却/暂停号的可用积分（禁用号已是 0）；
+		// snapshot  = 含禁用号快照的总量（= 把死钱也算进去的旧口径，仅供诊断对照）；
+		// quota     = 可用号的总额度。三者分开写，避免读者猜。
+		"credits": func() map[string]any {
+			var available, snapshot, quota int64
+			byRealm := map[string]map[string]int64{}
+			for _, st := range h.cfg.Pool.List() {
+				available += st.Credits
+				snapshot += st.CreditsRaw
+				if st.CreditsTotal > 0 {
+					quota += st.CreditsTotal
+				}
+				r := st.Realm
+				if r == "" {
+					r = "cn"
+				}
+				agg := byRealm[r]
+				if agg == nil {
+					agg = map[string]int64{}
+					byRealm[r] = agg
+				}
+				agg["available"] += st.Credits
+				agg["snapshot"] += st.CreditsRaw
+				agg["quota"] += st.CreditsTotal
+			}
+			return map[string]any{
+				"available": available,
+				"snapshot":  snapshot,
+				"quota":     quota,
+				"by_realm":  byRealm,
+			}
+		}(),
+		"redis_mode": redisMode,
 		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单：账号池视图回答
 		// 「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
 		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。零回归只增键。

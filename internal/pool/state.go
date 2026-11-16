@@ -674,6 +674,20 @@ func (p *Pool) List() []Status {
 	}
 	return out
 }
+// activeCredits 返回对外报告的积分量：**禁用账号一律为 0**。
+//
+// /status 的语义是「当前可用量」，而账号被封后余额停在最后一次成功刷新的冻结快照
+// （实测有账号封禁三周仍显示 4,552，其中积分包早已过期）。把快照当可用量会让面板
+// 合计、积分保底与外部消费方全部基于死数据，而且不报错、只给出看似合理的数字。
+//
+// 暂停号不受影响：它照常保号、余额仍会刷新，只是暂不接流量，积分是真的。
+func activeCredits(v int64, disabled bool) int64 {
+	if disabled {
+		return 0
+	}
+	return v
+}
+
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	st := Status{
@@ -687,8 +701,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Enterprise:               e.a.IsEnterprise(),
 		APIKey:                   e.a.IsAPIKey(),
 		Nickname:                 e.a.Nickname,
-		Credits:                  e.credits,
-		CreditsTotal:             e.creditsTotal,
+		Credits:                  activeCredits(e.credits, e.disabled),
+		CreditsRaw:               e.credits,
+		CreditsTotal:             activeCredits(e.creditsTotal, e.disabled),
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,

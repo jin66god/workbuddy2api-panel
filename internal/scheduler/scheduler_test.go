@@ -587,8 +587,13 @@ func TestRunBalanceRefreshIncludesDisabledUpdatesCredits(t *testing.T) {
 
 	s.RunBalanceRefreshNow()
 	st, _ := p.Status("u2")
-	if st.Credits != 700 {
-		t.Errorf("禁用号 credits=%d want 700（余额刷新应覆盖禁用号）", st.Credits)
+	// 余额刷新必须真的覆盖禁用号：真实值落在 credits_raw（调度器据此判断下一个该
+	// 启用谁）。对外的 credits 是「可用量」，禁用号一律 0 —— 两者要同时成立。
+	if st.CreditsRaw != 700 {
+		t.Errorf("禁用号 credits_raw=%d want 700（余额刷新应覆盖禁用号）", st.CreditsRaw)
+	}
+	if st.Credits != 0 {
+		t.Errorf("禁用号 credits=%d want 0（可用量口径，死钱不算可用额度）", st.Credits)
 	}
 	if !st.Disabled {
 		t.Errorf("余额刷新不得解冻禁用号: %+v", st)

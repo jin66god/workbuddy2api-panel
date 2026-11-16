@@ -71,8 +71,14 @@ type ExpiryBucket struct {
 type Status struct {
 	UID          string `json:"uid"`
 	Nickname     string `json:"nickname,omitempty"`
-	Credits      int64  `json:"credits"`
-	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
+	// Credits 当前**可用**积分量：禁用账号一律为 0（封号后余额是最后一次成功
+	// 刷新的冻结快照，把死钱算进可用额度会让面板合计与路由判断全部基于死数据）。
+	Credits int64 `json:"credits"`
+	// CreditsRaw 真实余额快照（**不是可用量**）：禁用号保留封号前的最后值，供
+	// 调度器判断「下一个该启用谁」与面板 tooltip 展示「还压着多少积分」。
+	// 未禁用时与 Credits 相同。
+	CreditsRaw   int64 `json:"credits_raw,omitempty"`
+	CreditsTotal int64 `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
 	// 的到期压力。CreditsExpiring 是配置窗口内的剩余积分；后两者是全部未来到期批次中
 	// 最早的一批及其剩余量，供 WorkDaddy 同口径的“最早到期优先”路由使用。
