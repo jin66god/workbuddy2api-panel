@@ -40,8 +40,8 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("report desktop: %v", err)
 	}
-	if gotUA != desktopUA {
-		t.Errorf("UA=%q want %q", gotUA, desktopUA)
+	if wantUA := "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"; gotUA != wantUA {
+		t.Errorf("UA=%q want %q", gotUA, wantUA)
 	}
 	if len(got) != 1 {
 		t.Fatalf("events=%d want 1", len(got))
@@ -102,8 +102,8 @@ func TestSetAppearanceTheme(t *testing.T) {
 		if r.URL.Path != "/v2/user-asset/appearance/set" {
 			t.Errorf("path=%s want /v2/user-asset/appearance/set", r.URL.Path)
 		}
-		if r.Header.Get("User-Agent") != desktopUA {
-			t.Errorf("UA=%q want desktop UA", r.Header.Get("User-Agent"))
+		if wantUA := "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"; r.Header.Get("User-Agent") != wantUA {
+			t.Errorf("UA=%q want %q", r.Header.Get("User-Agent"), wantUA)
 		}
 		raw, _ := io.ReadAll(r.Body)
 		json.Unmarshal(raw, &got)
@@ -140,5 +140,38 @@ func TestDesktopBuddyAppSequenceIsFirstPageIsBool(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("五连事件里没有 buddyapp_enter_click")
+	}
+}
+
+// TestDesktopTripleByRealm 桌面端上报三元组必须按 realm 取，且与 UA / X-IDE-Version 同源。
+//
+// 恒用单一三元组会给另一域账号盖上不属于其分发包的包指纹（版本号与安装清单自相矛盾），
+// 是设备侧写最容易识破的一处；这条用例同时钉住「三元组 / UA / X-IDE-Version 三者一致」。
+func TestDesktopTripleByRealm(t *testing.T) {
+	c := &Client{}
+	cn := &auth.Auth{UID: "u-cn", Domain: "www.workbuddy.cn"}
+	global := &auth.Auth{UID: "u-gl", Domain: "www.workbuddy.ai"}
+
+	ver, commit, release := desktopTriple(cn)
+	if ver != "5.11.3" || commit != "ecace0f7028166695994300182295329b8b95449" || release != int64(1794502169764) {
+		t.Fatalf("CN triple = %s/%s/%d，与 5.11.3 分发包不符", ver, commit, release)
+	}
+	fp := desktopFingerprint(cn)
+	if fp["ideVersion"] != ver || fp["extVersion"] != ver || fp["commit"] != commit || fp["releaseDate"] != release {
+		t.Fatalf("CN 指纹与三元组不一致: %#v", fp)
+	}
+	if ua := c.desktopUAFor(cn); ua != "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0" {
+		t.Fatalf("CN desktop UA=%q", ua)
+	}
+	if got := desktopVersionFor(cn); got != ver {
+		t.Fatalf("CN X-IDE-Version=%q want %q", got, ver)
+	}
+
+	gver, gcommit, grelease := desktopTriple(global)
+	if gver != "5.9.4" || gcommit != "fa0a0901906addaa1a4259f6df347388a5563ded" || grelease != int64(1793288804029) {
+		t.Fatalf("global triple = %s/%s/%d，与 5.9.4 分发包不符", gver, gcommit, grelease)
+	}
+	if ua := c.desktopUAFor(global); ua != "workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0" {
+		t.Fatalf("global desktop UA=%q", ua)
 	}
 }

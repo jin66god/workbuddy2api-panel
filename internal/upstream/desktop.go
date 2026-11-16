@@ -1,11 +1,12 @@
-// desktop.go 桌面客户端（WorkBuddy Desktop 5.5.6）行为指纹上报。
+// desktop.go 桌面客户端（WorkBuddy Desktop，CN 5.11.3 / global 5.9.4）行为指纹上报。
 //
-// 来源：2026-09-12 Sunny 抓包实测（data/desktop-task-protocol.md）。桌面端点亮
+// 来源：2026-09-12 Sunny 抓包实测（data/desktop-task-protocol.md），版本三元组与
+// UA 段随后续分发包更新（见本文件顶部常量）。桌面端点亮
 // 「需电脑端」类任务的关键不是独立端点，而是同一 POST /v2/report 通道上
 // **不同的客户端指纹**：
 //
 //	POST https://copilot.tencent.com/v2/report        ← chatBase（CLI 上报走 billingBase）
-//	User-Agent: WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1
+//	User-Agent: WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0   ← 版本随分发包，按 realm 取
 //	X-Domain: copilot.tencent.com, X-Product: SaaS, X-User-Id: <uid>
 //	Body: [ {...event...} ]                           ← 数组
 //
@@ -39,9 +40,53 @@ import (
 const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
-	// desktopUA 实测桌面客户端 UA（5.5.6 内嵌 CLI 2.137.1）。
-	desktopUA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+
+	// 桌面端 /v2/report 上报的版本三元组（ideVersion / commit / releaseDate）。
+	// commit 与 releaseDate 是打包期常量、无法从版本号推导，必须按分发包逐字取：
+	//
+	//	CN 5.11.3    commit ecace0f7… releaseDate 1794502169764（cli/product.json）
+	//	global 5.9.4 commit fa0a0901… releaseDate 1793288804029
+	//
+	// 恒用单一三元组会给另一域的账号盖上不属于其分发包的包指纹（版本号与安装清单
+	// 自相矛盾），是最容易被设备侧写识破的一处。
+	//
+	// 注：CN 新值只有静态证据（product.json 的 genieVersion / commit / date，与包名
+	// 短 hash `ecace0f7` 交叉一致），未抓 5.11.3 真机 /v2/report；releaseDate 历史上
+	// 与真机事件值相差约 5 秒，拿到抓包后按实测覆盖。
+	desktopVersionCN         = "5.11.3"
+	desktopCommitCN          = "ecace0f7028166695994300182295329b8b95449"
+	desktopReleaseDateCN     = int64(1794502169764)
+	desktopVersionGlobal     = "5.9.4"
+	desktopCommitGlobal      = "fa0a0901906addaa1a4259f6df347388a5563ded"
+	desktopReleaseDateGlobal = int64(1793288804029)
 )
+
+// desktopTriple 按 realm 返回桌面端上报版本三元组（CN 默认，nil 账号按 CN）。
+func desktopTriple(a *auth.Auth) (ver, commit string, releaseDate int64) {
+	if a != nil && a.IsGlobal() {
+		return desktopVersionGlobal, desktopCommitGlobal, desktopReleaseDateGlobal
+	}
+	return desktopVersionCN, desktopCommitCN, desktopReleaseDateCN
+}
+
+// desktopUAFor 桌面端出站 UA：两段品牌一致，版本段与 CLI 段都随分发包走。
+//
+//	CN 5.11.3    → `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`
+//	global 5.9.4 → `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`
+func (c *Client) desktopUAFor(a *auth.Auth) string {
+	ver, _, _ := desktopTriple(a)
+	brand := "WorkBuddy"
+	if a != nil && a.IsGlobal() {
+		brand = "workbuddy-ai"
+	}
+	return brand + "/" + ver + " " + brand + "/" + ver + " CLI/" + c.cliVersionFor(a)
+}
+
+// desktopVersionFor 桌面端上报的 ideVersion（X-IDE-Version 头用）。
+func desktopVersionFor(a *auth.Auth) string {
+	v, _, _ := desktopTriple(a)
+	return v
+}
 
 // desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
@@ -59,6 +104,7 @@ type DesktopEvent map[string]any
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
 func desktopFingerprint(a *auth.Auth) map[string]any {
 	now := time.Now().UnixMilli()
+	ver, commit, releaseDate := desktopTriple(a)
 	return map[string]any{
 		"timezone":     "Asia/Shanghai",
 		"reportDelay":  2000,
@@ -66,15 +112,15 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"username":     a.Nickname,
 		"userNickname": a.Nickname,
 		"product":      "SaaS",
-		"releaseDate":  int64(1789036585355),
-		"commit":       "5f9692923c93033111c51ad7b003eb80204a9b75",
+		"releaseDate":  releaseDate,
+		"commit":       commit,
 		"ideName":      "WorkBuddy",
 		"ideType":      "WorkBuddy",
-		"ideVersion":   "5.5.6",
+		"ideVersion":   ver,
 		"machineId":    deriveID(a, "machine"),
 		"sessionId":    deriveID(a, "session"),
 		"extName":      "workbuddy-desktop",
-		"extVersion":   "5.5.6",
+		"extVersion":   ver,
 		"os":           "win32",
 		"arch":         "x64",
 		"osVersion":    "10.0.26220",
@@ -115,7 +161,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopUAFor(a))
 	req.Header.Set("X-Domain", c.desktopBase(a))
 	req.Header.Set("X-Product", "SaaS")
 	req.Header.Set("X-Request-ID", deriveID(a, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
@@ -216,7 +262,7 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopUAFor(a))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -418,7 +464,7 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.desktopUAFor(a))
 	req.Header.Set("X-Domain", c.chatBase(a))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
@@ -466,7 +512,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
-	h.Set("User-Agent", desktopUA)
+	h.Set("User-Agent", c.desktopUAFor(a))
 	h.Set("X-Domain", c.chatBase(a))
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
@@ -476,7 +522,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Agent-Type", "main")
 	h.Set("X-IDE-Name", "WorkBuddy")
 	h.Set("X-IDE-Type", "WorkBuddy")
-	h.Set("X-IDE-Version", "5.5.6")
+	h.Set("X-IDE-Version", desktopVersionFor(a))
 	h.Set("x-codebuddy-request", "1")
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)

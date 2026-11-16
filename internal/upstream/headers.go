@@ -15,18 +15,31 @@ import (
 )
 
 const (
-	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐 CN 官方桌面端 5.9.3（2026-10-28 真机 661 条请求验证）。
+	// defaultClientVersionCN 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
+	// 白名单头组的 X-IDE-Version）。对齐 CN 官方桌面端 5.11.3
+	// （2026-11-16 拆 5.11.3.43806934：package.json version / cli/product.json
+	// genieVersion / Homebrew workbuddy-cn cask 三处一致）。
 	// config upstream.client_version 可覆盖（空 = 内置默认，CN/global 共用覆盖值）。
-	defaultClientVersion = "5.9.3"
-	// defaultGlobalClientVersion 国际版官方客户端版本。两版发版节奏不同（CN 5.9.3 /
+	defaultClientVersionCN = "5.11.3"
+	// defaultGlobalClientVersion 国际版官方客户端版本。两版发版节奏不同（CN 5.11.3 /
 	// global 5.9.4），共用一个值会让国际版号的 UA 对不上当前分发包。
 	// 5.9.4 取值证据（2026-10-30 拆包 + 真机抓包）：app.asar/package.json version、
-	// cli/product.json genieVersion、真机 UA / X-IDE-Version 三处一致。
+	// cli/product.json genieVersion、真机 UA / X-IDE-Version 三处一致；2026-11 的
+	// Homebrew workbuddy-ai cask 仍停在 5.9.4.42593613。
 	defaultGlobalClientVersion = "5.9.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.165.0）。
-	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.165.0"
+	// defaultClientVersion CN 口径别名：无账号上下文的调用与既有测试按 CN 取值，
+	// 避免为了一个 realm 维度改动二十多处调用点。
+	defaultClientVersion = defaultClientVersionCN
+
+	// defaultCliVersionCN / defaultCliVersionGlobal 出站 UA 中 `CLI/<ver>` 段版本 =
+	// 各分发包内置的 @genie/agent-cli，**随包走、不是一个全局值**：CN 5.11.3 包带
+	// 2.176.0，国际分发包最新仍是 5.9.4（带 2.165.0）。用一个全局值会把国际号的 UA
+	// 拼成「5.9.4 + CLI/2.176.0」这种官方不存在的组合。
+	// config upstream.cli_version 可覆盖（空 = 按 realm 取内置默认）。
+	defaultCliVersionCN     = "2.176.0"
+	defaultCliVersionGlobal = "2.165.0"
+	// defaultCliVersion CN 口径别名（兼容既有调用与测试）。
+	defaultCliVersion = defaultCliVersionCN
 
 	originRefererCN     = "https://www.workbuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -55,7 +68,7 @@ func (c *Client) clientVersion() string {
 }
 
 // clientVersionFor 按账号 realm 返回生效的客户端版本：显式配置优先，否则
-// global 用 5.9.4、CN 用 5.9.3（两版发版节奏不同）。
+// global 用 5.9.4、CN 用 5.11.3（两版发版节奏不同）。
 func (c *Client) clientVersionFor(a *auth.Auth) string {
 	if c != nil && c.ClientVersion != "" {
 		return c.ClientVersion
@@ -66,30 +79,44 @@ func (c *Client) clientVersionFor(a *auth.Auth) string {
 	return defaultClientVersion
 }
 
-// cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则内置默认 defaultCliVersion。
+// cliVersion 生效的 CLI 版本（CN 口径）：Client.CliVersion 非空则取之，否则内置
+// 默认 defaultCliVersionCN。无账号上下文的调用用它，按 realm 分流见 cliVersionFor。
 func (c *Client) cliVersion() string {
 	if c != nil && c.CliVersion != "" {
 		return c.CliVersion
 	}
-	return defaultCliVersion
+	return defaultCliVersionCN
+}
+
+// cliVersionFor 按账号 realm 返回生效的 CLI 版本：显式配置优先，否则 global 用
+// 2.165.0、CN 用 2.176.0（CLI 版本随分发包走，两版不同）。
+func (c *Client) cliVersionFor(a *auth.Auth) string {
+	if c != nil && c.CliVersion != "" {
+		return c.CliVersion
+	}
+	if a != nil && a.IsGlobal() {
+		return defaultCliVersionGlobal
+	}
+	return defaultCliVersionCN
 }
 
 // defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
 // `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`。
 //
 // 品牌段按 realm 切换（2026-10-20 双版本真机抓包，同机同代理）：
-//   - CN 5.9.3：`WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`（驼峰原样）；
+//   - CN 5.11.3：`WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`（驼峰原样）；
 //   - global 5.9.4：`workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`（小写连字符，
 //     来自归档时 productName 的 slug 化）。
 //
 // 两版规则不同：曾把 global 写成 `WorkBuddy AI`（旧逆向证据）或把 CN 也套成 slug，
 // 都与当前分发包不符，是上游「非官方客户端」判定的候选指纹。
 func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
+	ver := c.clientVersionFor(a)
+	cli := c.cliVersionFor(a)
 	if a != nil && a.IsGlobal() {
-		ver := c.clientVersionFor(a)
-		return "workbuddy-ai/" + ver + " workbuddy-ai/" + ver + " CLI/" + c.cliVersion()
+		return "workbuddy-ai/" + ver + " workbuddy-ai/" + ver + " CLI/" + cli
 	}
-	return "WorkBuddy/" + c.clientVersion() + " WorkBuddy/" + c.clientVersion() + " CLI/" + c.cliVersion()
+	return "WorkBuddy/" + ver + " WorkBuddy/" + ver + " CLI/" + cli
 }
 
 // defaultWorkBuddyUA 返回 CN 形态的默认 UA（默认账号形态即 CN，零回归兼容既有调用/测试）。

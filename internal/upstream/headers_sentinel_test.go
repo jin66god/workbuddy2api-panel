@@ -36,20 +36,33 @@ func TestGlobalClientVersionMatchesPackage(t *testing.T) {
 	}
 }
 
-// TestCNClientVersionMatchesLatest 断言国内版默认客户端版本与官方更新检查结论一致
-// （2026-11 客户端「软件更新」：WorkBuddy 5.9.3 已是最新版），CLI 段 2.165.0。
+// TestCNClientVersionMatchesLatest 断言国内版默认客户端版本与官方分发包一致
+// （2026-11-16 拆 5.11.3.43806934：package.json version / cli/product.json
+// genieVersion / Homebrew workbuddy-cn cask 三处同为 5.11.3；内置 CLI 2.176.0）。
 // 单独钉住 CN 常量：此前只有 global 的断言，CN 被改回旧值 CI 仍全绿。
 func TestCNClientVersionMatchesLatest(t *testing.T) {
-	if defaultClientVersion != "5.9.3" {
-		t.Fatalf("defaultClientVersion=%q want 5.9.3", defaultClientVersion)
+	if defaultClientVersion != "5.11.3" {
+		t.Fatalf("defaultClientVersion=%q want 5.11.3", defaultClientVersion)
 	}
-	if defaultCliVersion != "2.165.0" {
-		t.Fatalf("defaultCliVersion=%q want 2.165.0", defaultCliVersion)
+	if defaultCliVersion != "2.176.0" {
+		t.Fatalf("defaultCliVersion=%q want 2.176.0", defaultCliVersion)
 	}
 	c := &Client{}
 	for _, a := range []*auth.Auth{nil, {Domain: "www.workbuddy.cn"}, {Domain: "www.codebuddy.cn"}} {
-		if got := c.clientVersionFor(a); got != "5.9.3" {
-			t.Fatalf("cn clientVersion=%q want 5.9.3 (domain=%v)", got, a)
+		if got := c.clientVersionFor(a); got != "5.11.3" {
+			t.Fatalf("cn clientVersion=%q want 5.11.3 (domain=%v)", got, a)
 		}
+		if got := c.cliVersionFor(a); got != "2.176.0" {
+			t.Fatalf("cn cliVersion=%q want 2.176.0 (domain=%v)", got, a)
+		}
+	}
+	// CLI 段随分发包走：国际号必须停在 2.165.0，不能被 CN 的新值带走——否则会拼出
+	// 「5.9.4 + CLI/2.176.0」这种官方不存在的组合。
+	if got := c.cliVersionFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "2.165.0" {
+		t.Fatalf("global cliVersion=%q want 2.165.0", got)
+	}
+	if ua := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); ua !=
+		"workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0" {
+		t.Fatalf("global UA=%q 与分发包不符", ua)
 	}
 }
