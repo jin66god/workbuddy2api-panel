@@ -368,7 +368,8 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 // ---------------------------------------------------------------------------
 // 2026-09-12 第五轮：客户端 asar 逆向 + Sunny 真实样本驱动的新判据（三账号实测点亮）。
 // 来源：WorkBuddy.exe 5.5.6 app.asar 渲染层事件枚举/载荷 + 抓包真实专家召唤样本
-// （data/desktop-task-protocol.md §7.3）。
+// （data/desktop-task-protocol.md §7.3）。事件**形状**采集自 5.5.6；版本三元组与
+// 出站 UA 见本文件顶部常量，按当前分发包取值。
 // ---------------------------------------------------------------------------
 
 // DesktopTemplateUseSequence 构造「使用模板创建任务」事件组（实测 template_5 计数）：

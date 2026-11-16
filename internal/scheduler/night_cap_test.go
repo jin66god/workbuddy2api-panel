@@ -8,7 +8,10 @@ import (
 )
 
 func TestCapByCredits(t *testing.T) {
-	mk := func(uid string, c int64) pool.Status { return pool.Status{UID: uid, Credits: c} }
+	// 健康号：可用量与快照通常相同。
+	mk := func(uid string, c int64) pool.Status {
+		return pool.Status{UID: uid, Credits: c, CreditsRaw: c}
+	}
 	// cap<=0 或不超上限：原样返回。
 	list := []pool.Status{mk("a", 3), mk("b", 9)}
 	if got := capByCredits(list, 0); len(got) != 2 || &got[0] != &list[0] {
@@ -30,6 +33,14 @@ func TestCapByCredits(t *testing.T) {
 	}
 	if !set["b"] || !set["d"] {
 		t.Fatalf("want {b,d}, got %v", set)
+	}
+	// 禁用号的 credits 是对外可用量（恒 0），排序必须用 credits_raw：它仍在候选集里
+	// 跑保号任务，不该因为「不可用」被统一压到末尾。
+	if got := capByCredits([]pool.Status{
+		{UID: "dead", Credits: 0, CreditsRaw: 900, Disabled: true},
+		mk("x", 100), mk("y", 200),
+	}, 1); len(got) != 1 || got[0].UID != "dead" {
+		t.Fatalf("禁用号应按 credits_raw 参与排序，got %v", got)
 	}
 	// 原切片不被打乱（调用方 Pool.List 的共享底层数组不能被改序）。
 	if list[0].UID != "a" {

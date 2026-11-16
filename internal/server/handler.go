@@ -341,8 +341,12 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
+	// 账号状态只取一次快照：下面的 accounts 与 credits 汇总共用同一份数据。两次
+	// 分别 List() 会在并发窗口里读到不同快照（某个号刚好被禁用/复活时，两处数字
+	// 会自相矛盾），也白白多跑一次 statusOf 遍历。
+	accounts := h.cfg.Pool.List()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accounts":       h.cfg.Pool.List(),
+		"accounts":       accounts,
 		"total":          total,
 		"healthy":        healthy,
 		"cooling":        cooling,
@@ -365,7 +369,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"credits": func() map[string]any {
 			var available, snapshot, quota int64
 			byRealm := map[string]map[string]int64{}
-			for _, st := range h.cfg.Pool.List() {
+			for _, st := range accounts {
 				available += st.Credits
 				snapshot += st.CreditsRaw
 				if st.CreditsTotal > 0 {

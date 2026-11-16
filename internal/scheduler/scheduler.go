@@ -951,13 +951,17 @@ func (s *Scheduler) NightAccountCap() int { return int(s.nightAccountCap.Load())
 
 // capByCredits 夜间任务候选收窄：按积分降序取前 cap 个（余额未知/相同的顺序不稳定，
 // 但候选集每天基本不变，无需额外确定性）。cap<=0 或候选不超上限时原样返回。
+//
+// 排序用 CreditsRaw 而不是 Credits：Credits 是对外的「可用量」（禁用号恒 0），而本函数
+// 是在**参与任务**的候选里挑余额高的，禁用号（IncludeDisabledInTasks 打开时）也在候选
+// 内、同样要跑保号任务。用可用量排序会把它们统一压到末尾，等于改变了既有分配顺序。
 func capByCredits(list []pool.Status, cap int) []pool.Status {
 	if cap <= 0 || len(list) <= cap {
 		return list
 	}
 	sorted := append([]pool.Status(nil), list...)
 	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j].Credits > sorted[j-1].Credits; j-- {
+		for j := i; j > 0 && sorted[j].CreditsRaw > sorted[j-1].CreditsRaw; j-- {
 			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
 		}
 	}
