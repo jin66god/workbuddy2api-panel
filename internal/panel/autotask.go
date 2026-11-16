@@ -250,6 +250,9 @@ var mpTaskCodes = map[string]bool{
 	"Sequential_Tasks_5": true,
 	"Sequential_Tasks_6": true,
 	"Sequential_Tasks_7": true,
+	// 关注「腾讯 WorkBuddy」公众号满 24h：进度由服务端计时发放，没有可上报的
+	// 客户端动作，只能等它自然达标后领奖；登记在此是为了 accept/claim 走 mp 口径。
+	"wb_wechat_oa_subscribe_task": true,
 }
 
 // isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
@@ -395,10 +398,11 @@ func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 			return &tasks[i], nil
 		}
 	}
-	if isMPTaskCode(code) {
-		return p.taskByCodeMP(a, code)
-	}
-	return nil, nil
+	// 默认列表没找到就再按 mp 口径找一次：任务中心改版后常规任务也可能只在 mp
+	// 列表下发（Library_read 就是这样），不回落会把真实存在的任务判成「该账号
+	// 没有此任务」，一键完成于是整项跳过。每次未命中多一次列表调用，只在未命中时
+	// 发生（runAutoAll 的 have 快照已先挡掉不存在的任务，那里不会走到这）。
+	return p.taskByCodeMP(a, code)
 }
 
 // claimPollAttempts / claimPollGap 达标回读的有界轮询参数。

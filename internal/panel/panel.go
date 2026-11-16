@@ -960,7 +960,10 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	defer p.finishBatch()
 	p.cfg.Scheduler.RunBalanceRefreshNow()
 	p.syncNicknames()
-	log.Printf("panel: 手动全量余额刷新完成")
+	// 日志带调用来源：这条路径只能由面板「刷新余额」按钮触发，运维看到「没人点也
+	// 刷新了」时无从判断是谁打的——把 RemoteAddr/UA 打出来即可区分浏览器误触、
+	// 开着旧标签页的机器，或持有面板 key 的脚本。
+	log.Printf("panel: 手动全量余额刷新完成 src=%s ua=%q", r.RemoteAddr, r.UserAgent())
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
 }
 
