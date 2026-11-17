@@ -364,6 +364,8 @@ function go(v) {
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
+  // 实时任务只在任务中心可见时轮询，切走就停（后台标签页不该打上游）。
+  if (v === 'taskscenter') startLive(); else stopLive();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
@@ -2280,7 +2282,7 @@ function groupItems(d) {
   }
   return groups;
 }
-const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行' };
+const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', claim: '待领取' };
 function qrowHTML(it) {
   const isSchool = it.kind === 'school';
   const title = isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
@@ -3869,3 +3871,98 @@ if (logExportBtn) {
     }
   };
 }
+
+/* ── 实时任务 ─────────────────────────────────────────────────────────
+   数据源：GET /panel/api/tasks/live（后端 45s TTL 缓存，一行一个账号的当前任务表）。
+   为什么要这块：既有「后台任务」只在作业跑过之后才有内容，「扫描待办」要手动点，
+   两者都得有人先动一下，看板永远滞后。这里进页面就自动拉、按间隔自动刷。
+
+   轮询只在本页可见且浏览器在前台时跑（切走就停）；间隔拿后端 ttl_sec 做下限——
+   比 TTL 还短只是打服务端缓存，白耗请求。
+   状态变量用 var 而不是 let：go() 在脚本中段就被 start() 调到，let 会落进 TDZ。 */
+var liveTimer = null, liveEvery = 45, liveTTL = 45, liveLoading = false;
+
+// liveTaskRow 把上游 Task 渲染成与「扫描待办」同款的行，保证两处观感一致。
+function liveTaskRow(t) {
+  const st = t.claimed ? 'done' : t.claimable ? 'claim' : (t.locked ? 'skipped' : 'scan');
+  const cur = t.current ?? 0, tgt = t.target ?? 0;
+  const prog = tgt > 0 ? cur + '/' + tgt : (cur > 0 ? String(cur) : '');
+  const gain = [t.credit ? '+' + t.credit + 'c' : '', t.energy ? '+' + t.energy + 'e' : ''].join('');
+  return qrowHTML({
+    code: t.task_code,
+    status: st,
+    prog: prog,
+    message: [t.title, (t.task_desc || t.description), gain].filter(Boolean).join(' · '),
+  });
+}
+
+// renderLive 渲染整块：账号头一行 + 该账号的任务行。单账号失败只影响自己那行。
+function renderLive(d) {
+  const rows = d.accounts || [];
+  const list = $('liveList'), empty = $('liveEmpty'), sum = $('liveSummary'), note = $('liveNote');
+  if (!list) return;
+  const bad = rows.filter(r => r.error).length;
+  const pending = rows.reduce((n, r) => n + (r.pending || 0), 0);
+  const claim = rows.reduce((n, r) => n + (r.claimable || 0), 0);
+  if (sum) sum.textContent = rows.length
+    ? rows.length + ' 个账号 · 未完成 ' + pending + ' · 可领取 ' + claim + (bad ? ' · 失败 ' + bad : '')
+    : '';
+  if (empty) empty.style.display = rows.length ? 'none' : '';
+  if (note) {
+    note.textContent = '数据 ' + (d.age_sec ?? 0) + ' 秒前拉取' + (d.cached ? '（缓存）' : '') +
+      '；轮询间隔不低于后端缓存 ' + (d.ttl_sec || 45) + ' 秒。';
+  }
+  list.innerHTML = rows.map(r => {
+    const who = '<div class="state" style="margin:6px 0 2px">' +
+      esc(r.nickname || String(r.uid || '').slice(0, 10)) + ' · ' + esc(r.realm || '') +
+      ' · 未完成 ' + (r.pending || 0) + ' / 可领取 ' + (r.claimable || 0) + ' / 已领 ' + (r.claimed || 0) + '</div>';
+    if (r.error) {
+      return who + '<div class="qrow" title="' + esc(r.error) + '">' +
+        '<span class="code">—</span><span class="name"><span class="t">读取失败</span></span>' +
+        '<span class="prog"></span><span class="st"><span class="qdot err"></span>失败</span>' +
+        '<span class="msg">' + esc(r.error) + '</span></div>';
+    }
+    return who + (r.tasks || []).map(liveTaskRow).join('');
+  }).join('');
+}
+
+async function loadLive(force) {
+  if (liveLoading || !$('liveList')) return;
+  liveLoading = true;
+  try {
+    const d = await api('tasks/live' + (force ? '?fresh=1' : ''));
+    liveTTL = d.ttl_sec || liveTTL;
+    renderLive(d);
+  } catch (e) {
+    if ($('liveNote')) $('liveNote').textContent = '实时任务读取失败：' + ((e && e.message) || e);
+  } finally {
+    liveLoading = false;
+  }
+}
+
+function scheduleLive() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (!(liveEvery > 0)) return;
+  // 兜底：若在模块末尾的赋值执行前就被调到（例如页面恢复视图时先 go 一次），
+  // liveTTL 还是 undefined，Math.max 会得到 NaN，setInterval(NaN) 等同 0ms 紧循环。
+  const ttl = liveTTL > 0 ? liveTTL : 45;
+  const ms = Math.max(liveEvery, ttl) * 1000;
+  if (!(ms > 0)) return;
+  liveTimer = setInterval(() => {
+    if (document.visibilityState === 'visible' && view === 'taskscenter') loadLive();
+  }, ms);
+}
+
+function startLive() { loadLive(); scheduleLive(); }
+function stopLive() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+
+if ($('btnLiveReload')) $('btnLiveReload').onclick = () => loadLive(true);
+if ($('liveEvery')) {
+  $('liveEvery').onchange = () => {
+    liveEvery = parseInt($('liveEvery').value, 10) || 0;
+    scheduleLive();
+  };
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && view === 'taskscenter') loadLive();
+});

@@ -235,6 +235,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
+	// 实时任务：直接向每个账号查一次任务表并按 TTL 缓存，供看板定时轮询。
+	// 与 tasks/jobs（后台作业结果）、tasks/scan_all（手动扫描）互补：那两个都要
+	// 有人先动一下，这里不需要。
+	p.mux.HandleFunc("GET /panel/api/tasks/live", p.withAuth(p.tasksLive))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
