@@ -3902,8 +3902,10 @@ function liveTaskRow(t) {
   const prog = tgt > 0 ? cur + '/' + tgt : (cur > 0 ? String(cur) : '—');
   const name = t.title || t.task_code || '未命名任务';
   const code = t.task_code && t.task_code !== name ? t.task_code : '';
-  const gain = (t.credit ? '<b>+' + t.credit + '</b><span>积分</span>' : '') +
-               (t.energy ? '<b>+' + t.energy + '</b><span>能量</span>' : '');
+  const gainParts = [];
+  if (t.credit) gainParts.push('<b>+' + t.credit + '</b><span>积分</span>');
+  if (t.energy) gainParts.push('<b>+' + t.energy + '</b><span>能量</span>');
+  const gain = gainParts.map(x => '<div class="lrw">' + x + '</div>').join('');
   const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
   return '<tr' + (claimable ? ' class="lclaim"' : '') + ' title="' + esc(tip) + '">' +
     '<td class="ltask"><div class="lt">' + esc(name) + '</div>' +
@@ -3942,7 +3944,10 @@ function renderLive(d) {
   }
   if (!rows.length) { list.innerHTML = ''; return; }
 
-  const head = '<table><thead><tr><th>任务</th><th class="r">进度</th><th>状态</th><th class="r">奖励</th></tr></thead><tbody>';
+  // colgroup 写死右侧三列：只靠 th 百分比时，浏览器会把余量继续摊给「奖励」，
+  // 结果奖励列吃掉近四成宽度、内容却挤在左边。固定到像素后列宽不再漂移。
+  const head = '<table><colgroup><col><col style="width:128px"><col style="width:104px"><col style="width:168px"></colgroup>' +
+    '<thead><tr><th>任务</th><th class="r">进度</th><th>状态</th><th class="r">奖励</th></tr></thead><tbody>';
   const body = rows.map(r => {
     const nick = r.nickname || String(r.uid || '').slice(0, 10);
     const stat = [];
