@@ -1899,6 +1899,12 @@ async function loadTasks() {
   try {
     const d = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks');
     const list = d.tasks || [];
+    // 只读 realm（国际版）：保留任务列表以便和「实时任务」口径一致，但不给任何
+    // 会失败的动作入口——点了也是白撞上游。
+    if (d.readonly) {
+      if ($('btnTaskAcceptAll')) $('btnTaskAcceptAll').hidden = true;
+      if ($('btnTaskAutoAll')) $('btnTaskAutoAll').hidden = true;
+    }
     if (!list.length) {
       st.className = 'state';
       st.textContent = '该账号暂无任务';
@@ -1906,6 +1912,7 @@ async function loadTasks() {
     }
     // 有进度或可领取的排前面，已领取沉底——一眼看到"现在该做什么"。
     list.sort((a, b) => (a.claimed - b.claimed) || (b.claimable - a.claimable) || String(a.task_code).localeCompare(String(b.task_code)));
+    if (d.readonly && d.message && st) { st.className = 'state'; st.textContent = d.message; st.hidden = false; }
     $('taskBody').innerHTML = list.map(t => {
       // 进度：current 可能缺失（0 或被上游省略）——用 ?? 兜底，避免渲染成 "undefined / N"
       const cur = t.current ?? 0, tgt = t.target ?? 0;
@@ -3899,10 +3906,13 @@ function liveTaskRow(t) {
                (t.energy ? '<b>+' + t.energy + '</b><span>能量</span>' : '');
   const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
   return '<tr' + (claimable ? ' class="lclaim"' : '') + ' title="' + esc(tip) + '">' +
-    '<td class="ltask"><div class="lt">' + esc(name) + '</div>' + (code ? '<div class="lc">' + esc(code) + '</div>' : '') + '</td>' +
+    '<td class="ltask"><div class="lt">' + esc(name) + '</div>' +
+      (code || t.task_desc || t.description
+        ? '<div class="lc">' + esc([code, t.task_desc || t.description].filter(Boolean).join(' · ')) + '</div>'
+        : '') + '</td>' +
     '<td class="lprog"><span class="lbar"><i style="width:' + pct + '%"></i></span>' + esc(prog) + '</td>' +
     '<td><span class="lpill ' + cls + '"><i></i>' + word + '</span></td>' +
-    '<td class="lrew">' + gain + '</td></tr>';
+    '<td class="lrew">' + (gain || '<span class="lrew-none">—</span>') + '</td></tr>';
 }
 
 // 两个状态图标用内联 SVG（统一 1.5px 描边），不用 emoji 顶替图标。

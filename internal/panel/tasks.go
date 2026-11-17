@@ -40,12 +40,20 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系")
 		return
 	}
-	// 国际版没有成长任务活动：列表接口会回一份模板任务，但报名/领奖都不生效，
-	// 网页端也没有入口。这里直接返回空列表，避免面板显示一排点了没用的「接受」。
+	// 国际版：报名/领奖都不生效（网页端也没有该活动入口），但任务表本身可读——小程序口径
+	// 会带回 first_chat / skill_installed 等真实进度。这里返回**同一份**列表并标 readonly：
+	// 之前直接返回空数组，导致「账号详情」显示没有任务、而「实时任务」显示有进度，两个视图
+	// 自相矛盾；前端据 readonly 隐藏接受/领取按钮，避免点了没用的按钮。
 	if a.IsGlobal() {
+		tasks := []upstream.Task{}
+		if mp, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+			tasks = mp
+		} else if def, err2 := p.cfg.Upstream.ListTasks(a); err2 == nil {
+			tasks = def
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "realm": "global", "tasks": []any{}, "readonly": true,
-			"message": "国际版暂无成长任务活动",
+			"ok": true, "realm": "global", "tasks": tasks, "readonly": true,
+			"message": "国际版任务为只读：可查看进度，报名与领奖未开放",
 		})
 		return
 	}

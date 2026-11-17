@@ -117,14 +117,14 @@ body {
 #liveList::-webkit-scrollbar { width: 10px; height: 10px; }
 #liveList::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 3px solid var(--surface); }
 #liveList::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
-#liveList table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+#liveList table { width: 100%; max-width: 940px; border-collapse: collapse; table-layout: fixed; }
 #liveList thead th {
   position: sticky; top: 0; z-index: 2; background: var(--surface);
   text-align: left; font-weight: 500; font-size: 11.5px; color: var(--ink-3);
   padding: 8px 12px 7px; border-bottom: 1px solid var(--line); white-space: nowrap;
 }
 #liveList thead th.r { text-align: right; }
-#liveList th:nth-child(1) { width: auto; }
+#liveList th:nth-child(1) { width: 46%; }
 #liveList th:nth-child(2) { width: 132px; }
 #liveList th:nth-child(3) { width: 104px; }
 #liveList th:nth-child(4) { width: 112px; }
@@ -170,6 +170,7 @@ body {
 #liveList td.lrew { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 #liveList td.lrew b { font-weight: 600; color: var(--ink); }
 #liveList td.lrew span { margin-left: 3px; font-size: 11px; color: var(--ink-3); }
+#liveList .lrew-none { color: var(--ink-3); }
 
 /* 状态胶囊：底色 + 圆点，比纯文字更快扫读 */
 #liveList .lpill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px 2px 7px; border-radius: 999px; font-size: 11.5px; white-space: nowrap; }
@@ -178,7 +179,7 @@ body {
 #liveList .lpill.done i { background: var(--ok); }
 #liveList .lpill.claim { background: rgba(90,140,255,.16); color: var(--accent); font-weight: 600; }
 #liveList .lpill.claim i { background: var(--accent); }
-#liveList .lpill.idle { background: var(--surface-2); color: var(--ink-2); }
+#liveList .lpill.idle { background: var(--surface-2); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line); }
 #liveList .lpill.idle i { box-shadow: inset 0 0 0 1.5px var(--ink-2); }
 #liveList .lpill.mute { background: var(--surface-2); color: var(--ink-3); }
 #liveList .lpill.mute i { background: var(--ink-3); }
