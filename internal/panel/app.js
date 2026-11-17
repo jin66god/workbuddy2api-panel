@@ -2282,7 +2282,7 @@ function groupItems(d) {
   }
   return groups;
 }
-const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', claim: '待领取' };
+const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', claim: '可领取' };
 function qrowHTML(it) {
   const isSchool = it.kind === 'school';
   const title = isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
@@ -3882,21 +3882,33 @@ if (logExportBtn) {
    状态变量用 var 而不是 let：go() 在脚本中段就被 start() 调到，let 会落进 TDZ。 */
 var liveTimer = null, liveEvery = 45, liveTTL = 45, liveLoading = false;
 
-// liveTaskRow 把上游 Task 渲染成与「扫描待办」同款的行，保证两处观感一致。
+// liveTaskRow 一条任务一行：主列是任务名，任务码作次要信息，奖励与进度只留数字。
+// 之前复用队列的 .qrow 五列布局，任务码会被当成「短名」再被 GROWTH_TITLES 回落成
+// 同一个字符串，同一行里出现两次同样内容，中间还留一大片空白；这里改成表格式，
+// 名称/码分主次，长描述只进 tooltip。
 function liveTaskRow(t) {
-  const st = t.claimed ? 'done' : t.claimable ? 'claim' : (t.locked ? 'skipped' : 'scan');
+  const claimed = !!t.claimed, claimable = !!t.claimable, locked = !!t.locked;
+  const dot = claimed ? 'done' : claimable ? 'run' : locked ? 'skip' : 'wait';
+  const word = claimed ? '已领取' : claimable ? '可领取' : locked ? '未解锁' : '未完成';
   const cur = t.current ?? 0, tgt = t.target ?? 0;
-  const prog = tgt > 0 ? cur + '/' + tgt : (cur > 0 ? String(cur) : '');
-  const gain = [t.credit ? '+' + t.credit + 'c' : '', t.energy ? '+' + t.energy + 'e' : ''].join('');
-  return qrowHTML({
-    code: t.task_code,
-    status: st,
-    prog: prog,
-    message: [t.title, (t.task_desc || t.description), gain].filter(Boolean).join(' · '),
-  });
+  const prog = tgt > 0 ? cur + '/' + tgt : (cur > 0 ? String(cur) : '—');
+  const gains = [];
+  if (t.credit) gains.push('<span class="lnum">+' + t.credit + '</span><span class="lunit">积分</span>');
+  if (t.energy) gains.push('<span class="lnum">+' + t.energy + '</span><span class="lunit">能量</span>');
+  // 用 HTML 片段而不是纯字符串：数字与单位分开排，右对齐时数值列才对得齐。
+  const gain = gains.length ? gains.join('') : '—';
+  const name = t.title || t.task_code || '未命名任务';
+  const code = t.task_code && t.task_code !== name ? t.task_code : '';
+  const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
+  return '<tr title="' + esc(tip) + '">' +
+    '<td class="ltask"><div class="lt">' + esc(name) + '</div>' + (code ? '<div class="lc">' + esc(code) + '</div>' : '') + '</td>' +
+    '<td class="num lprog">' + esc(prog) + '</td>' +
+    '<td><span class="lst"><span class="qdot ' + dot + '"></span>' + word + '</span></td>' +
+    '<td class="num lrew">' + gain + '</td>' +
+    '</tr>';
 }
 
-// renderLive 渲染整块：账号头一行 + 该账号的任务行。单账号失败只影响自己那行。
+// renderLive 渲染整块：一个账号一段，段头是账号与三项计数，下面紧跟它的任务行。
 function renderLive(d) {
   const rows = d.accounts || [];
   const list = $('liveList'), empty = $('liveEmpty'), sum = $('liveSummary'), note = $('liveNote');
@@ -3905,25 +3917,37 @@ function renderLive(d) {
   const pending = rows.reduce((n, r) => n + (r.pending || 0), 0);
   const claim = rows.reduce((n, r) => n + (r.claimable || 0), 0);
   if (sum) sum.textContent = rows.length
-    ? rows.length + ' 个账号 · 未完成 ' + pending + ' · 可领取 ' + claim + (bad ? ' · 失败 ' + bad : '')
+    ? rows.length + ' 个账号 · 未完成 ' + pending + ' · 可领取 ' + claim + (bad ? ' · 读取失败 ' + bad : '')
     : '';
   if (empty) empty.style.display = rows.length ? 'none' : '';
   if (note) {
     note.textContent = '数据 ' + (d.age_sec ?? 0) + ' 秒前拉取' + (d.cached ? '（缓存）' : '') +
       '；轮询间隔不低于后端缓存 ' + (d.ttl_sec || 45) + ' 秒。';
   }
-  list.innerHTML = rows.map(r => {
-    const who = '<div class="state" style="margin:6px 0 2px">' +
-      esc(r.nickname || String(r.uid || '').slice(0, 10)) + ' · ' + esc(r.realm || '') +
-      ' · 未完成 ' + (r.pending || 0) + ' / 可领取 ' + (r.claimable || 0) + ' / 已领 ' + (r.claimed || 0) + '</div>';
+  if (!rows.length) { list.innerHTML = ''; return; }
+
+  const head = '<div class="tbl-wrap"><table class="acc zebra"><thead><tr>' +
+    '<th>任务</th><th class="num">进度</th><th>状态</th><th class="num">奖励</th>' +
+    '</tr></thead><tbody>';
+  const body = rows.map(r => {
+    const nick = r.nickname || String(r.uid || '').slice(0, 10);
+    const who = '<tr class="lgroup"><td colspan="4">' +
+      '<span class="lname" title="' + esc(nick) + '">' + esc(nick) + '</span>' +
+      (r.realm ? '<span class="tag mute">' + esc(r.realm) + '</span>' : '') +
+      (r.error
+        ? '<span class="lmeta lbad">⚠ 读取失败</span>'
+        : '<span class="lmeta">未完成 ' + (r.pending || 0) + ' · 可领取 ' + (r.claimable || 0) + ' · 已领取 ' + (r.claimed || 0) + '</span>') +
+      '</td></tr>';
     if (r.error) {
-      return who + '<div class="qrow" title="' + esc(r.error) + '">' +
-        '<span class="code">—</span><span class="name"><span class="t">读取失败</span></span>' +
-        '<span class="prog"></span><span class="st"><span class="qdot err"></span>失败</span>' +
-        '<span class="msg">' + esc(r.error) + '</span></div>';
+      return who + '<tr><td colspan="4" class="lerr">⚠ 读取失败：' + esc(r.error) + '</td></tr>';
     }
-    return who + (r.tasks || []).map(liveTaskRow).join('');
+    const tasks = r.tasks || [];
+    if (!tasks.length) {
+      return who + '<tr><td colspan="4" class="lempty">该账号暂无任务</td></tr>';
+    }
+    return who + tasks.map(liveTaskRow).join('');
   }).join('');
+  list.innerHTML = head + body + '</tbody></table></div>';
 }
 
 async function loadLive(force) {

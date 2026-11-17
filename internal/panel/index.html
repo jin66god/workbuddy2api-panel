@@ -110,6 +110,34 @@ body {
 .qdot.wait { background: none; border: 1.5px solid var(--ink-3); }
 .qdot.err { background: var(--bad); }
 .qdot.skip { background: var(--ink-3); }
+/* 实时任务：按账号分组的任务表（复用 .acc 骨架；组头单独染色，任务名主、任务码次） */
+/* 列宽固定给「进度/状态/奖励」，任务列吃掉剩余宽度：否则任务列被撑到半屏，
+   右三列挤在边缘，视线跨度过大。min-width 降到能放下四列即可，避免横向滚动。 */
+#liveList .acc { min-width: 420px; table-layout: fixed; }
+#liveList th:nth-child(1) { width: auto; }
+#liveList th:nth-child(2), #liveList td.lprog { width: 76px; text-align: right; }
+#liveList th:nth-child(3) { width: 96px; }
+#liveList th:nth-child(4), #liveList td.lrew { width: 104px; text-align: right; }
+#liveList th.num { text-align: right; }
+#liveList tr.lgroup td {
+  background: var(--surface-2); font-weight: 600; font-size: 12.5px; color: var(--ink);
+  padding: 8px 11px 8px 9px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  border-left: 3px solid var(--accent);
+}
+#liveHead { flex-wrap: wrap; row-gap: 8px; }
+#liveList tr.lgroup .tag { margin-left: 8px; }
+#liveList tr.lgroup .lmeta { margin-left: 10px; font-weight: 400; font-size: 11.5px; color: var(--ink-3); }
+#liveList td.ltask { max-width: 340px; }
+#liveList td.ltask .lt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#liveList td.ltask .lc { font: 11px/1.5 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#liveList td.lprog, #liveList td.lrew { font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
+#liveList .lst { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+#liveList td.lerr { color: var(--bad); background: color-mix(in srgb, var(--bad) 7%, transparent); }
+#liveList td.lempty { color: var(--ink-3); font-style: italic; }
+#liveList tr.lgroup .lmeta.lbad { color: var(--bad); font-weight: 600; }
+#liveList tr.lgroup .lname { display: inline-block; max-width: 46%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+#liveList tr.lgroup td { overflow: hidden; }
+#liveList .lunit { display: inline-block; width: 30px; margin-left: 3px; text-align: left; color: var(--ink-3); font-family: var(--sans, inherit); }
 @keyframes qpulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .qdot.run { animation: none; } }
 .srow { display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto; gap: 14px; align-items: center; padding: 13px 16px; }
@@ -802,7 +830,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <!-- 实时任务：直接向每个账号查任务表，前端定时轮询，不需要任何手动扫描。
            与下面「后台任务 / 扫描待办」互补：那两个都要有人先动一下才有内容。 -->
       <div class="box">
-        <header>
+        <header id="liveHead">
           <h3>实时任务 <span class="hint" id="liveSummary"></span></h3>
           <span class="grow"></span>
           <label class="sel-note" title="每次轮询向每个启用账号查一次任务表（只读）">自动刷新

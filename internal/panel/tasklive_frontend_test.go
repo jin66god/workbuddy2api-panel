@@ -48,7 +48,7 @@ func TestLiveTasksFrontendWiring(t *testing.T) {
 		"function liveTaskRow(",
 		"'tasks/live'",
 		"if (v === 'taskscenter') startLive(); else stopLive();",
-		"claim: '待领取'",
+		"claim: '可领取'",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js 缺 %q", want)
