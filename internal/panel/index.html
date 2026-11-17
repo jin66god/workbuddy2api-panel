@@ -110,34 +110,86 @@ body {
 .qdot.wait { background: none; border: 1.5px solid var(--ink-3); }
 .qdot.err { background: var(--bad); }
 .qdot.skip { background: var(--ink-3); }
-/* 实时任务：按账号分组的任务表（复用 .acc 骨架；组头单独染色，任务名主、任务码次） */
-/* 列宽固定给「进度/状态/奖励」，任务列吃掉剩余宽度：否则任务列被撑到半屏，
-   右三列挤在边缘，视线跨度过大。min-width 降到能放下四列即可，避免横向滚动。 */
-#liveList .acc { min-width: 420px; table-layout: fixed; }
-#liveList th:nth-child(1) { width: auto; }
-#liveList th:nth-child(2), #liveList td.lprog { width: 76px; text-align: right; }
-#liveList th:nth-child(3) { width: 96px; }
-#liveList th:nth-child(4), #liveList td.lrew { width: 104px; text-align: right; }
-#liveList th.num { text-align: right; }
-#liveList tr.lgroup td {
-  background: var(--surface-2); font-weight: 600; font-size: 12.5px; color: var(--ink);
-  padding: 8px 11px 8px 9px; border-bottom: 1px solid var(--line); white-space: nowrap;
-  border-left: 3px solid var(--accent);
+/* 实时任务：账号分组的任务表。
+   分组行用「头像 + 名称 + 三个计数胶囊」建立层级，任务行用进度条与状态胶囊承载数据；
+   不再用彩色 border-left 做分组标记（那是卡片/列表项上的廉价装饰）。 */
+#liveList { max-height: 460px; overflow: auto; overscroll-behavior: contain; }
+#liveList::-webkit-scrollbar { width: 10px; height: 10px; }
+#liveList::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 3px solid var(--surface); }
+#liveList::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
+#liveList table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+#liveList thead th {
+  position: sticky; top: 0; z-index: 2; background: var(--surface);
+  text-align: left; font-weight: 500; font-size: 11.5px; color: var(--ink-3);
+  padding: 8px 12px 7px; border-bottom: 1px solid var(--line); white-space: nowrap;
 }
-#liveHead { flex-wrap: wrap; row-gap: 8px; }
-#liveList tr.lgroup .tag { margin-left: 8px; }
-#liveList tr.lgroup .lmeta { margin-left: 10px; font-weight: 400; font-size: 11.5px; color: var(--ink-3); }
-#liveList td.ltask { max-width: 340px; }
-#liveList td.ltask .lt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#liveList td.ltask .lc { font: 11px/1.5 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#liveList td.lprog, #liveList td.lrew { font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
-#liveList .lst { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-#liveList td.lerr { color: var(--bad); background: color-mix(in srgb, var(--bad) 7%, transparent); }
-#liveList td.lempty { color: var(--ink-3); font-style: italic; }
-#liveList tr.lgroup .lmeta.lbad { color: var(--bad); font-weight: 600; }
-#liveList tr.lgroup .lname { display: inline-block; max-width: 46%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
-#liveList tr.lgroup td { overflow: hidden; }
-#liveList .lunit { display: inline-block; width: 30px; margin-left: 3px; text-align: left; color: var(--ink-3); font-family: var(--sans, inherit); }
+#liveList thead th.r { text-align: right; }
+#liveList th:nth-child(1) { width: auto; }
+#liveList th:nth-child(2) { width: 132px; }
+#liveList th:nth-child(3) { width: 104px; }
+#liveList th:nth-child(4) { width: 112px; }
+#liveList tbody tr { animation: liveIn .18s cubic-bezier(.16,1,.3,1); }
+@keyframes liveIn { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+
+/* 分组行：头像 + 名称 + 计数胶囊。背景只比正文深一档，靠留白与字重分层。 */
+#liveList tr.lgroup td {
+  padding: 13px 12px 8px; border-top: 1px solid var(--line); background: var(--surface-2);
+  white-space: nowrap; overflow: hidden;
+}
+#liveList tr.lgroup:first-child td { border-top: 0; padding-top: 6px; }
+#liveList .lav {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 22px; height: 22px; border-radius: 50%; margin-right: 8px;
+  background: var(--accent-soft, rgba(90,140,255,.14)); color: var(--accent);
+  font-size: 11px; font-weight: 600; vertical-align: -6px;
+}
+#liveList .lname { font-size: 13px; font-weight: 600; color: var(--ink); vertical-align: -3px; }
+#liveList .lchip {
+  display: inline-block; margin-left: 7px; padding: 1px 6px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--line); color: var(--ink-2);
+  font-size: 10.5px; letter-spacing: .02em; vertical-align: -1px;
+}
+#liveList .lstats { margin-left: 12px; font-size: 11.5px; color: var(--ink-2); }
+#liveList .lstats span { margin-left: 8px; }
+#liveList .lstats .lsep { margin: 0 2px; color: var(--ink-3); }
+#liveList tr.lclaim td.ltask .lt { font-weight: 600; }
+#liveList .lstats .on { color: var(--ink-2); }
+#liveList .lstats .warn.on { color: var(--warn, #b26b00); }
+#liveList .lstats .ok.on { color: var(--ok); }
+
+/* 任务行 */
+#liveList td { padding: 9px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+#liveList tbody tr:last-child td { border-bottom: 0; }
+#liveList tbody tr:hover td { background: var(--surface-2); }
+#liveList td.ltask { max-width: 0; }
+#liveList td.ltask .lt { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#liveList td.ltask .lc { font: 11px/1.6 var(--mono); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#liveList td.lprog { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+#liveList .lbar { display: inline-block; width: 56px; height: 4px; margin-right: 8px; border-radius: 2px; background: var(--line); vertical-align: 2px; overflow: hidden; }
+#liveList .lbar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+#liveList td.lrew { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#liveList td.lrew b { font-weight: 600; color: var(--ink); }
+#liveList td.lrew span { margin-left: 3px; font-size: 11px; color: var(--ink-3); }
+
+/* 状态胶囊：底色 + 圆点，比纯文字更快扫读 */
+#liveList .lpill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px 2px 7px; border-radius: 999px; font-size: 11.5px; white-space: nowrap; }
+#liveList .lpill i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+#liveList .lpill.done { background: var(--ok-soft); color: var(--ok); }
+#liveList .lpill.done i { background: var(--ok); }
+#liveList .lpill.claim { background: rgba(90,140,255,.16); color: var(--accent); font-weight: 600; }
+#liveList .lpill.claim i { background: var(--accent); }
+#liveList .lpill.idle { background: var(--surface-2); color: var(--ink-2); }
+#liveList .lpill.idle i { box-shadow: inset 0 0 0 1.5px var(--ink-2); }
+#liveList .lpill.mute { background: var(--surface-2); color: var(--ink-3); }
+#liveList .lpill.mute i { background: var(--ink-3); }
+
+/* 失败/空状态行：整体占满一行，用右侧留白与色调区分，不靠图标堆砌 */
+#liveList td.lfull { padding: 12px 12px 14px; border-bottom: 1px solid var(--line-soft); }
+#liveList .lerrbox { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-radius: 8px; background: rgba(220,60,60,.07); color: var(--bad); font-size: 12.5px; }
+#liveList .lerrbox svg { flex: none; }
+#liveList .lemptybox { display: flex; align-items: center; gap: 8px; padding: 10px 2px 4px; color: var(--ink-3); font-size: 12.5px; }
+#liveList .lemptybox svg { flex: none; opacity: .7; }
+#liveList .lmeta.lbad, #liveSummary .lbadstat { color: var(--bad); font-weight: 600; }
 @keyframes qpulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .qdot.run { animation: none; } }
 .srow { display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto; gap: 14px; align-items: center; padding: 13px 16px; }

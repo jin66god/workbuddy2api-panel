@@ -3882,33 +3882,35 @@ if (logExportBtn) {
    状态变量用 var 而不是 let：go() 在脚本中段就被 start() 调到，let 会落进 TDZ。 */
 var liveTimer = null, liveEvery = 45, liveTTL = 45, liveLoading = false;
 
-// liveTaskRow 一条任务一行：主列是任务名，任务码作次要信息，奖励与进度只留数字。
-// 之前复用队列的 .qrow 五列布局，任务码会被当成「短名」再被 GROWTH_TITLES 回落成
-// 同一个字符串，同一行里出现两次同样内容，中间还留一大片空白；这里改成表格式，
-// 名称/码分主次，长描述只进 tooltip。
+// liveTaskRow 一条任务一行。三处刻意的取舍：
+//   - 进度用「细条 + 数字」而不是纯数字：一眼看出离达标还差多少，又不用读小数点；
+//   - 状态用带底色的胶囊而不是纯文字：13 个账号的长列表里，颜色比文字更快定位；
+//   - 奖励把数字加粗、单位降级，数值右对齐时才对得齐。
 function liveTaskRow(t) {
   const claimed = !!t.claimed, claimable = !!t.claimable, locked = !!t.locked;
-  const dot = claimed ? 'done' : claimable ? 'run' : locked ? 'skip' : 'wait';
+  const cls = claimed ? 'done' : claimable ? 'claim' : locked ? 'mute' : 'idle';
   const word = claimed ? '已领取' : claimable ? '可领取' : locked ? '未解锁' : '未完成';
   const cur = t.current ?? 0, tgt = t.target ?? 0;
+  const pct = tgt > 0 ? Math.min(100, Math.round((cur / tgt) * 100)) : 0;
   const prog = tgt > 0 ? cur + '/' + tgt : (cur > 0 ? String(cur) : '—');
-  const gains = [];
-  if (t.credit) gains.push('<span class="lnum">+' + t.credit + '</span><span class="lunit">积分</span>');
-  if (t.energy) gains.push('<span class="lnum">+' + t.energy + '</span><span class="lunit">能量</span>');
-  // 用 HTML 片段而不是纯字符串：数字与单位分开排，右对齐时数值列才对得齐。
-  const gain = gains.length ? gains.join('') : '—';
   const name = t.title || t.task_code || '未命名任务';
   const code = t.task_code && t.task_code !== name ? t.task_code : '';
+  const gain = (t.credit ? '<b>+' + t.credit + '</b><span>积分</span>' : '') +
+               (t.energy ? '<b>+' + t.energy + '</b><span>能量</span>' : '');
   const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
-  return '<tr title="' + esc(tip) + '">' +
+  return '<tr' + (claimable ? ' class="lclaim"' : '') + ' title="' + esc(tip) + '">' +
     '<td class="ltask"><div class="lt">' + esc(name) + '</div>' + (code ? '<div class="lc">' + esc(code) + '</div>' : '') + '</td>' +
-    '<td class="num lprog">' + esc(prog) + '</td>' +
-    '<td><span class="lst"><span class="qdot ' + dot + '"></span>' + word + '</span></td>' +
-    '<td class="num lrew">' + gain + '</td>' +
-    '</tr>';
+    '<td class="lprog"><span class="lbar"><i style="width:' + pct + '%"></i></span>' + esc(prog) + '</td>' +
+    '<td><span class="lpill ' + cls + '"><i></i>' + word + '</span></td>' +
+    '<td class="lrew">' + gain + '</td></tr>';
 }
 
-// renderLive 渲染整块：一个账号一段，段头是账号与三项计数，下面紧跟它的任务行。
+// 两个状态图标用内联 SVG（统一 1.5px 描边），不用 emoji 顶替图标。
+const LIVE_ICON_ERR = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.8v3.9M8 11.2h.01"/></svg>';
+const LIVE_ICON_EMPTY = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="2.8" y="3.6" width="10.4" height="8.8" rx="1.6"/><path d="M2.8 6.6h10.4"/></svg>';
+
+// renderLive 渲染整块：一个账号一段（分组行 + 它的任务行）。
+// 计数胶囊只显示非零项，避免每个账号都挂一串「可领取 0 · 已领取 0」的噪音。
 function renderLive(d) {
   const rows = d.accounts || [];
   const list = $('liveList'), empty = $('liveEmpty'), sum = $('liveSummary'), note = $('liveNote');
@@ -3916,9 +3918,13 @@ function renderLive(d) {
   const bad = rows.filter(r => r.error).length;
   const pending = rows.reduce((n, r) => n + (r.pending || 0), 0);
   const claim = rows.reduce((n, r) => n + (r.claimable || 0), 0);
-  if (sum) sum.textContent = rows.length
-    ? rows.length + ' 个账号 · 未完成 ' + pending + ' · 可领取 ' + claim + (bad ? ' · 读取失败 ' + bad : '')
-    : '';
+  if (sum) {
+    // 读取失败用红色标出来：混在灰色统计里会被当成正常数字。
+    sum.innerHTML = rows.length
+      ? esc(rows.length + ' 个账号 · 未完成 ' + pending + (claim ? ' · 可领取 ' + claim : '')) +
+        (bad ? ' · <span class="lbadstat">读取失败 ' + bad + '</span>' : '')
+      : '';
+  }
   if (empty) empty.style.display = rows.length ? 'none' : '';
   if (note) {
     note.textContent = '数据 ' + (d.age_sec ?? 0) + ' 秒前拉取' + (d.cached ? '（缓存）' : '') +
@@ -3926,28 +3932,33 @@ function renderLive(d) {
   }
   if (!rows.length) { list.innerHTML = ''; return; }
 
-  const head = '<div class="tbl-wrap"><table class="acc zebra"><thead><tr>' +
-    '<th>任务</th><th class="num">进度</th><th>状态</th><th class="num">奖励</th>' +
-    '</tr></thead><tbody>';
+  const head = '<table><thead><tr><th>任务</th><th class="r">进度</th><th>状态</th><th class="r">奖励</th></tr></thead><tbody>';
   const body = rows.map(r => {
     const nick = r.nickname || String(r.uid || '').slice(0, 10);
+    const stat = [];
+    stat.push('未完成 ' + (r.pending || 0));
+    if (r.claimable) stat.push('<span class="warn on">可领取 ' + r.claimable + '</span>');
+    if (r.claimed) stat.push('<span class="ok on">已领取 ' + r.claimed + '</span>');
     const who = '<tr class="lgroup"><td colspan="4">' +
+      '<span class="lav">' + esc(nick.slice(0, 1).toUpperCase()) + '</span>' +
       '<span class="lname" title="' + esc(nick) + '">' + esc(nick) + '</span>' +
-      (r.realm ? '<span class="tag mute">' + esc(r.realm) + '</span>' : '') +
-      (r.error
-        ? '<span class="lmeta lbad">⚠ 读取失败</span>'
-        : '<span class="lmeta">未完成 ' + (r.pending || 0) + ' · 可领取 ' + (r.claimable || 0) + ' · 已领取 ' + (r.claimed || 0) + '</span>') +
+      (r.realm ? '<span class="lchip">' + esc(r.realm) + '</span>' : '') +
+      '<span class="lstats">' + (r.error
+        ? '<span class="lmeta lbad">读取失败</span>'
+        : stat.join('<span class="lsep">·</span>')) + '</span>' +
       '</td></tr>';
     if (r.error) {
-      return who + '<tr><td colspan="4" class="lerr">⚠ 读取失败：' + esc(r.error) + '</td></tr>';
+      return who + '<tr><td colspan="4" class="lfull"><div class="lerrbox">' + LIVE_ICON_ERR +
+        '<span>读取失败：' + esc(r.error) + '</span></div></td></tr>';
     }
     const tasks = r.tasks || [];
     if (!tasks.length) {
-      return who + '<tr><td colspan="4" class="lempty">该账号暂无任务</td></tr>';
+      return who + '<tr><td colspan="4" class="lfull"><div class="lemptybox">' + LIVE_ICON_EMPTY +
+        '<span>该账号暂无任务</span></div></td></tr>';
     }
     return who + tasks.map(liveTaskRow).join('');
   }).join('');
-  list.innerHTML = head + body + '</tbody></table></div>';
+  list.innerHTML = head + body + '</tbody></table>';
 }
 
 async function loadLive(force) {
