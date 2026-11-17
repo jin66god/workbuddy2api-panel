@@ -1,4 +1,4 @@
-// tool_pairing.go 出站请求体的孤儿 tool_call↔tool 配对清理 + tool 结果块重排
+// tool_pairing.go 出站请求体的孤儿 tool_call↔tool 配对清理 + tool 结果块重排 + 早到结果回位
 // （吸收参考仓库 sse.ts:91-123 resolveToolPairing 语义，适配网关的 OpenAI wire 消息形态）。
 //
 // 背景：OpenAI 兼容协议要求带 tool_calls 的 assistant 消息，其每一个 tool_call id
@@ -12,6 +12,115 @@
 package upstream
 
 import "strings"
+
+// reorderEarlyToolResults 把「早于其声明」的 role:tool 结果挪到对应 assistant
+// (tool_calls) 之后，保证 wire 上永远是「调用在前、结果在后」。
+//
+// 背景：OpenAI 兼容协议按位置配对——tool 结果必须出现在声明它的 assistant 之后。
+// 有些客户端会把顺序写反：Codex 经 cc-switch 类本地代理转发 /v1/responses 时，
+// input 里 function_call_output 排在 function_call 之前；适配器按输入顺序拼接，
+// 于是出站就是 tool(c0) 在前、assistant(tool_calls c0) 在后，上游判 11148
+// tool_call_sequence_broken 并顶死整条会话，换号无效。
+//
+// 既有的两步都盖不住这一种倒置：repack 只从 role==assistant 起始处理，前面那条
+// 早到的 tool 被当普通消息直通、原样留在原地；cleanup 因两侧 id 都在，判「配对完整」
+// 放行。所以这一步必须排在配对管线最前（见 payload.go 的调用顺序）。
+//
+// 只调顺序、不改内容：call id 在一次请求内唯一，重排无损，工具语义与结果正文都
+// 原样保留。落点是所属 assistant 之后、其后连续 tool 结果之后（与 repack 同口径）：
+// 正常顺序的结果先出，早到的那几条补在同批末尾，同批内原相对顺序保持不变。
+//
+// 边界：
+//   - 同一 id 被多条 assistant 声明时跟最后一次声明走（与 cleanupOrphanToolCalls 的
+//     对称裁剪口径一致）；
+//   - 找不到声明者的孤儿结果不动，交给 cleanupOrphanToolCalls 删；
+//   - 本来顺序就对的请求零改动零分配（返回原 slice 与 false）。
+func reorderEarlyToolResults(messages []any) ([]any, bool) {
+	if len(messages) < 2 {
+		return messages, false
+	}
+	// ① 记录每个 tool_call id 的声明位置。
+	declAt := make(map[string]int)
+	for i, raw := range messages {
+		m, ok := raw.(map[string]any)
+		if !ok || m["role"] != "assistant" {
+			continue
+		}
+		tcs, ok := m["tool_calls"].([]any)
+		if !ok {
+			continue
+		}
+		for _, tci := range tcs {
+			tc, ok := tci.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, _ := tc["id"].(string); id != "" {
+				declAt[id] = i
+			}
+		}
+	}
+	if len(declAt) == 0 {
+		return messages, false
+	}
+	// ② 标出「结果早于声明」的下标。
+	early := make([]bool, len(messages))
+	anyEarly := false
+	for i, raw := range messages {
+		m, ok := raw.(map[string]any)
+		if !ok || m["role"] != "tool" {
+			continue
+		}
+		id, _ := m["tool_call_id"].(string)
+		if j, ok := declAt[id]; ok && j > i {
+			early[i] = true
+			anyEarly = true
+		}
+	}
+	if !anyEarly {
+		return messages, false
+	}
+	// ③ 按声明下标归组；正序遍历即保持同批结果的原相对顺序。
+	group := make(map[int][]any, len(declAt))
+	for i, raw := range messages {
+		if !early[i] {
+			continue
+		}
+		m, _ := raw.(map[string]any)
+		id, _ := m["tool_call_id"].(string)
+		j := declAt[id]
+		group[j] = append(group[j], raw)
+	}
+	// ④ 重建序列：遇到声明者先把它的那批早到结果挂起，等结果区结束（下一条非 tool
+	// 消息）再落地，避免插到同批正常结果之间。
+	out := make([]any, 0, len(messages))
+	var pending []any
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		out = append(out, pending...)
+		pending = nil
+	}
+	for i, raw := range messages {
+		if early[i] {
+			continue // 早到的结果不在此处落地
+		}
+		role := ""
+		if m, ok := raw.(map[string]any); ok {
+			role, _ = m["role"].(string)
+		}
+		if len(pending) > 0 && role != "tool" {
+			flush()
+		}
+		out = append(out, raw)
+		if g, ok := group[i]; ok {
+			pending = g
+		}
+	}
+	flush()
+	return out, true
+}
 
 // repackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的非 tool 消息
 // 挪到整组之后，保证同一批 tool_call 的结果在 wire 上连续。
