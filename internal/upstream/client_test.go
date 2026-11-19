@@ -55,6 +55,27 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		// 11129 / 11152：工具定义被上游整体拒收（schema 形态 / 工具名不合规）。
+		// 与 11101 同类——错在客户端声明的 tools，换任何账号都是同一处拒绝。
+		// 不登记就会落 ErrClient：每个健康号白记一笔连败并轮转整池，末端 503
+		// no_healthy_account，把确定性请求错误伪装成「账号暂时不可用」。
+		{400, `{"code":11129,"msg":"invalid_function_call_parameters: tools[0].parameters.type: null"}`, ErrBadParams},
+		{400, `{"code": 11129, "msg":"x"}`, ErrBadParams},
+		{400, `{"error":{"data":{"code":"11129","message":"bad tool schema"}}}`, ErrBadParams},
+		{400, `{"code":11129,"msg":"x","displayTips":{"zh":"工具定义不合规"}}`, ErrBadParams},
+		{400, `{"code":11152,"msg":"x","displayTips":{"zh":"工具名称不规范"}}`, ErrBadParams},
+		{400, `{"code":"11152","msg":"duplicated tool name"}`, ErrBadParams},
+		// 防过宽：111290 不是 11129（子串判定会把它们混在一起）。
+		{400, `{"code":111290,"msg":"unknown"}`, ErrClient},
+		// 11148 tool_calls 与 tool 结果不匹配：请求内容级配对断裂（上游明示重试
+		// 无效）。此前落 ErrClient → 全池轮转 + 喂连败 + 末端 503。
+		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolMismatch},
+		{400, `{"code": 11148, "msg":"x"}`, ErrToolMismatch},
+		{400, `{"code":11148,"msg":"工具调用与工具结果不匹配"}`, ErrToolMismatch},
+		// 上游也可能套 5xx 外壳：必须在状态码兜底之前判出来。
+		{500, `{"code":11148,"msg":"tool results do not match"}`, ErrToolMismatch},
+		// 11133 文案家族同样归请求级（不写第二份词表，复用 hint 层判定）。
+		{400, `{"msg":"model_param_invalid: max_tokens below minimum"}`, ErrModelParamInvalid},
 		// 图片格式/数据错误是确定性请求错误，分类后不轮转、不罚号。
 		{400, `{"code":11101,"msg":"Parse message failed: invalid image_url content at index 2: json: cannot unmarshal string into Go value of type v2.ImageContent"}`, ErrImageInvalid},
 		{400, `{"code":11135,"msg":"invalid_image_data"}`, ErrImageInvalid},
@@ -62,8 +83,9 @@ func TestClassify(t *testing.T) {
 		// 11135 业务码须容忍 JSON 空白（5d5223d：字面量 marker 只覆盖紧凑形态）。
 		{400, `{"code": 11135, "msg":"image data invalid"}`, ErrImageInvalid},
 		{400, `{"error":{"code": "11135", "message":"image invalid"}}`, ErrImageInvalid},
-		// 防过宽：11133（模型不支持图片）不进 image_invalid。
-		{400, `{"code": 11133, "msg":"model does not support image"}`, ErrClient},
+		// 防过宽：11133（模型不支持图片）不进 image_invalid；它自成一类请求级错误
+		// （不罚号、不轮转、末端 400），此前落 ErrClient 会被当账号故障喂连败。
+		{400, `{"code": 11133, "msg":"model does not support image"}`, ErrModelParamInvalid},
 		{200, `quota exceeded`, ErrHardCredit},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},

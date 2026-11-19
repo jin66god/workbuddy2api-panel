@@ -1391,6 +1391,36 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 11148 tool_calls 与 tool 结果不匹配：请求内容级配对断裂（上游明示重试
+			// 无效）。同一 body 换任何账号都是同一处 400，轮转只会白打整池并给健康号
+			// 记连败。立即透传上游原文回 400。
+			if kind == upstream.ErrToolMismatch {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				failKeepBinding(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "tool calls and tool results do not match"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_call_mismatch", msg,
+					h.hintOf(upstream.ErrToolMismatch, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
+			// 11133 模型供应商拒绝参数：同上，确定性请求级错误，换号无效。
+			if kind == upstream.ErrModelParamInvalid {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				failKeepBinding(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "request parameters were rejected by the model provider"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "model_param_invalid", msg,
+					h.hintOf(upstream.ErrModelParamInvalid, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 6021「queue.full.title」渠道级容量满载：**不罚号不轮转**，立即透传
 			// 上游原文回客户端（503 + upstream_busy）。上游集群排队打满时换任何
 			// 账号都撞同一堵墙——按限流处置会逐号软冷却，实测 2 秒绞杀整池健康号
@@ -1792,6 +1822,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
 			code = "model_unavailable"
 			status = http.StatusBadRequest
+		case upstream.ErrToolMismatch:
+			// 防御路径（正常已在轮转循环内 fail-fast 400）：本轮换号解决不了，
+			// 不能回 503 —— 那是「服务端过载、稍后重试」的语义，客户端会无限重发。
+			code = "tool_call_mismatch"
+			status = http.StatusBadRequest
+		case upstream.ErrModelParamInvalid:
+			// 同上：参数被模型供应商拒绝是确定性请求错误，回 400 而不是 503。
+			code = "model_param_invalid"
+			status = http.StatusBadRequest
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
@@ -2188,6 +2227,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 换任何账号都是同样的拒绝。零动作（不冷却/不熔断/不 NoteError/不喂连败）；
 		// 出站前 empty_text_part.go 已补位，走到这里说明补位没覆盖该形态，
 		// chatCompletions 已 fail-fast 400 透传原文、终止轮转。
+	case upstream.ErrToolMismatch:
+		// 11148 tool_calls 与 tool 结果不匹配：请求历史的问题，同一 body 换任何账号
+		// 都是同样的 400（上游明示重试无效）。零动作；chatCompletions 已 fail-fast
+		// 400 透传原文、终止轮转。这类错误此前落 ErrClient，会被当账号故障喂连败。
+	case upstream.ErrModelParamInvalid:
+		// 11133 模型供应商拒绝参数：请求的问题（缺/空 messages、模型不支持该能力、
+		// 参数形态不符）。零动作；chatCompletions 已 fail-fast 400 透传原文。
+		// 能力判定（是否该换模型）由 hint 层按模型目录给出，不在此罚号。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换了账号照样 400，

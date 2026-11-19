@@ -11,6 +11,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -83,8 +84,25 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 11-128 是请求形态问题：官方客户端要求 messages[0] 为 system 且会话头
 		// 三件套齐全。明确说「不是账号问题」，避免用户误以为号被封而反复换号。
 		return "upstream channel verification rejected this request (11-128); this is a request-shape issue, not an account problem — ensure messages[0].role is system and conversation headers are present"
+	case ErrBadParams:
+		// 11129/11152：整颗工具定义被拒（schema 形态或工具名），换号重试必然复现。
+		// 上游原文只说「工具定义不合规」，客户端看不出该改哪儿，这里点名 tools。
+		// 11101（请求体畸形）不给 hint：客户端去翻自己的 schema 只会走错方向。
+		if isToolSchemaRejected(msg, strings.ToLower(msg)) {
+			return "the request's tool definitions were rejected by upstream (schema shape or tool name); fix or drop the offending tool — retrying as-is fails the same way"
+		}
+		return ""
+	case ErrToolMismatch:
+		// 11148：assistant 的 tool_calls 与随后的 tool 结果对不上（顺序/数量/id）。
+		// 上游明示重试无效，客户端只能新建会话或修正历史。
+		return "tool call history does not match its tool results (order or id); retrying as-is fails the same way — start a new conversation or fix the tool messages"
+	case ErrModelParamInvalid:
+		// 11133：模型供应商拒绝参数（缺/空 messages、模型不支持该能力、参数形态不符）。
+		// 具体指向由上方 isModelParamInvalid 分支按「是否带图 + 模型目录能力」给出；
+		// 走到这里说明上下文信息不足，只给中性提示。
+		return "request parameters were rejected by the model provider; check message format and model capabilities"
 	default:
-		// ErrNone/ErrNotFound/ErrServer/ErrBadParams/ErrClient 等未覆盖形态：无 hint。
+		// ErrNone/ErrNotFound/ErrServer/ErrClient 等未覆盖形态：无 hint。
 		return ""
 	}
 }
@@ -134,19 +152,52 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
+// frameRequestCodes 首帧 error 帧里按 error.code 直接定类的请求级错误。
+//
+// 为什么不能只靠 message 走 Classify：帧里的业务码在 error.code 上，措辞不保证带
+// 已知文案——11133 的真实措辞不含 isModelParamInvalid 的任何 marker，11151 在
+// Classify 里本就只认结构化 code，11129/11152 的文案可能是英文原文、下划线形态或
+// 中文 displayMsg。判不出就落普通 4xx，首帧否决照样换号、末端 503。
+//
+// 11101 不在内：它与图片文案共用 code，须交给 Classify 的文案优先序。
+var frameRequestCodes = []struct {
+	code string
+	kind ErrKind
+}{
+	{"11115", ErrPromptTooLong},
+	{"11129", ErrBadParams},
+	{"11133", ErrModelParamInvalid},
+	{"11135", ErrImageInvalid},
+	{"11148", ErrToolMismatch},
+	{"11151", ErrEmptyContent},
+	{"11152", ErrBadParams},
+}
+
 // FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
-// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
-// Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
+// （IsModelRateLimit 对帧 JSON 直接命中）优先；其次按帧内 error.code 查请求级码表；
+// 最后取帧内 error.message 走 Classify（请求级 400 口径）。判不出 → ErrNone。
 func FrameKind(payload string) ErrKind {
 	if IsModelRateLimit(payload) {
 		return ErrSoftRate
 	}
 	var f struct {
 		Error struct {
+			Code    any    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal([]byte(payload), &f) != nil || f.Error.Message == "" {
+	if json.Unmarshal([]byte(payload), &f) != nil {
+		return ErrNone
+	}
+	if f.Error.Code != nil {
+		code := strings.TrimSpace(fmt.Sprint(f.Error.Code))
+		for _, c := range frameRequestCodes {
+			if code == c.code {
+				return c.kind
+			}
+		}
+	}
+	if f.Error.Message == "" {
 		return ErrNone
 	}
 	return Classify(http.StatusBadRequest, f.Error.Message)

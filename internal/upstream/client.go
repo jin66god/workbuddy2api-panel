@@ -49,6 +49,8 @@ const (
 	ErrModelBusy                     // 14003「Model busy」模型后端间歇繁忙 → 只停(账号×模型)短窗口，不罚账号、照常换号
 	ErrGatewayDown                   // Cloudflare 520/522/524 等「边缘→源站」故障 → 零惩罚、不轮转，末端 503
 	ErrEmptyContent                  // 11151「a message has empty content」→ 请求内容级空 text 段（出站已补位，这里是兜底）：不罚号、不轮转，末端 400 透传原文
+	ErrToolMismatch                  // 11148「tool calls and tool results do not match」→ 请求内容级配对断裂（换号无效）：不罚号、不轮转，末端 400 透传原文
+	ErrModelParamInvalid             // 11133「模型供应商拒绝了请求参数」（缺/空 messages、模型不支持图片、参数形态不符）→ 请求级：不罚号、不轮转，末端 400 透传原文
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -86,6 +88,10 @@ func (k ErrKind) String() string {
 		return "gateway_down"
 	case ErrEmptyContent:
 		return "empty_content"
+	case ErrToolMismatch:
+		return "tool_call_mismatch"
+	case ErrModelParamInvalid:
+		return "model_param_invalid"
 	case ErrAccountFault:
 		return "account_fault"
 	case ErrChannelRefused:
@@ -270,6 +276,39 @@ var alreadyCheckinMarkers = []string{"已签到", "already"}
 // 置 checkin_done，面板显示「今日已签」，实际是失败（少一次签到机会）。
 var checkinFailureMarkers = []string{"失败", "fail", "not started", "未开启", "不支持"}
 var badParamsMarkerCode = `"code":11101`
+
+// toolSchemaRejectMarkers 工具定义被上游整体拒收时的**文案**形态（业务码走
+// hasBusinessCode，见 isToolSchemaRejected）。11129 的 displayMsg 是「工具定义
+// 不合规」，上游也可能回英文原文或下划线形态，两者都收；11152 的 displayMsg 是
+// 「工具名称不规范」。
+var toolSchemaRejectMarkers = []string{
+	"invalid_function_call_parameters",
+	"invalid_function_call_parameters_error",
+	"工具定义不合规",
+	"工具名称不规范",
+}
+
+// isToolSchemaRejected 判定「工具定义被上游整体拒收」：11129（schema 形态不合规）
+// 与 11152（工具名不合规或重名）同属一类——错在客户端声明的 tools，换任何账号都是
+// 同一处拒绝。
+//
+// 为什么必须单列：这两个码此前落进通用 4xx 兜底 → ErrClient → 每个健康号白记一笔
+// 连败（达阈降权出池）并轮转整池，末端 503 no_healthy_account，把一个确定性的请求
+// 错误伪装成「账号暂时不可用」，客户端于是对必然失败的请求反复重发。
+//
+// 业务码用 hasBusinessCode（容忍空白、字符串形态与嵌套）：`"code":11129` 的子串
+// 判定会把 111290 一并命中。lower 须为 strings.ToLower(body)。
+func isToolSchemaRejected(body, lower string) bool {
+	if hasBusinessCode(body, "11129") || hasBusinessCode(body, "11152") {
+		return true
+	}
+	for _, m := range toolSchemaRejectMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
 // 与容器时区无关）。
@@ -800,6 +839,16 @@ func Classify(status int, body string) ErrKind {
 			}
 		}
 	}
+	// 11133「模型供应商拒绝了请求参数」（缺/空 messages、模型不支持图片、参数形态与
+	// 该模型版本不符等）与图片无效同族：确定性请求级错误，同一 body 换任何账号都会被
+	// 同一处拒绝。不在此分流会落 ErrClient → 全池轮转一遍后末端 503
+	// no_healthy_account，把必然失败的请求报成「账号不可用、稍后重试」（客户端于是
+	// 无限重试），且每个无效请求白打 MaxRotate 次上游。判定复用 hint 层的
+	// isModelParamInvalid（code 11133 / model_param_invalid 文案，JSON 空白容差），
+	// 不写第二份词表。
+	if status == http.StatusBadRequest && isModelParamInvalid(body) {
+		return ErrModelParamInvalid
+	}
 	// 11151「a message has empty content」：空 text 段被上游判为硬 400。出站前
 	// empty_text_part.go 已经补位（含「字符串被当 parts 嗅探」那种），到这里说明补位
 	// 没覆盖该形态，但它是**同一请求的错**：换任何账号都会被同一处拒绝，轮转只会白打
@@ -807,6 +856,14 @@ func Classify(status int, body string) ErrKind {
 	// 里，按词判会把正常请求误分类成「不再轮转」。
 	if status == http.StatusBadRequest && hasBusinessCode(body, "11151") {
 		return ErrEmptyContent
+	}
+	// 11148「tool calls and tool results do not match」：**请求内容**级配对断裂
+	// （上游明示「直接重试无效，请新建任务」）。不在此分流会落 ErrClient → 全池轮转
+	// 一遍（每个健康号白记一笔连败）+ 末端 503，而同一 body 换任何账号都是同样的
+	// 400。判在状态码兜底（404/5xx）之前——上游可能套 5xx 外壳。
+	if codeMarker(lower, "11148") || strings.Contains(lower, "tool results do not match") ||
+		strings.Contains(body, "工具调用与工具结果不匹配") {
+		return ErrToolMismatch
 	}
 	if status == http.StatusNotFound {
 		return ErrNotFound
@@ -855,7 +912,7 @@ func Classify(status int, body string) ErrKind {
 		// 归 ErrBadParams：不冷却/不熔断/不计错，且**不轮转**——11101 发生在上游解析
 		// 请求体阶段，还没走到模型路由，所以"不同账号可能有不同模型权限"其实是
 		// 11102（ErrModelBlocked）的理由，那里已有 (账号,模型) 负缓存避让。
-		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
+		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) || isToolSchemaRejected(body, lower) {
 			return ErrBadParams
 		}
 		return ErrClient
@@ -2169,6 +2226,9 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		ua = codeBuddyIDEUA
 	}
 	req.Header.Set("User-Agent", ua)
+	// X-Client-*：/v3/config 真机 3/3 条都带（含 CLI 两段式 UA 那条），说明注入挂在
+	// 客户端共享 HTTP 层而非某个 RPC 模块上（按 realm 隔离）。
+	c.injectClientIdentityHeaders(req, a)
 	c.injectCodeBuddyRequest(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
