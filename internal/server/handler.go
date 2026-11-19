@@ -800,6 +800,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
+	// noPick 选号失败的成因拆解：池里有号却只回一句 no_healthy_account 时，得能从
+	// 响应本身看出是谁挡的（暂停 / 禁用 / 冷却 / 在途满 / 积分保底 / 本次已试过）。
+	var noPick pool.NoPick
 	// 14003 全池短冷却时的「请求内等一次」状态（issue #46）：
 	// busyWaited = 本请求已等过一次，最多只等一次，防止无限拖住客户端。
 	busyWaited := false
@@ -1082,6 +1085,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 两者此前都报 no_healthy_account，导致「模型不可用」被读成「号全挂了」。
 			// 在这里取一次快照，供下方错误构造区分（issue #102 附带发现 1）。
 			modelBlock = h.cfg.Pool.ModelBlockedForRealm(bareModel, realm)
+			// 成因拆解与模型级阻塞分开取：前者答「号为什么选不中」，后者答「模型是不是
+			// 被单独停牌」。两者同时成立时，hint 会各带一段，互不覆盖。
+			noPick = h.cfg.Pool.NoPickForRealm(bareModel, realm, tried)
+			h.logNoSelectable(realm, bareModel, modelBlock.Blocked, noPick)
 			// 14003 模型后端间歇繁忙：全池该模型都进了 10s 短冷却时，先等一次
 			// 再重试整轮，而不是立刻 503。
 			//
@@ -1880,6 +1887,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			hint += "; upstream: " + s
 		}
 		status = http.StatusBadRequest
+	}
+	// 成因拆解（本地调度事实）：有号却选不到时，把各类计数直接塞进 gateway_hint ——
+	// 用户不必登服务器翻日志就知道该等冷却、恢复暂停、提并发还是调积分保底。
+	// 只挂在本地选号失败上：带上游原文的错误（token/内容/参数）与「号选不中」无关。
+	if code == "no_healthy_account" && noPick.Total > 0 {
+		if hint != "" {
+			hint += "; "
+		}
+		hint += "no_pick{" + noPick.String() + "}"
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
