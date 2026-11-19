@@ -168,6 +168,8 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// X-Client-*：/v2/report 属桌面端 RPC 族，真机每条都带这三头（按 realm 隔离）。
+	c.injectClientIdentityHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }
@@ -267,6 +269,8 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// X-Client-*：外观设置同属首方 RPC 族，同样带这三头（按 realm 隔离）。
+	c.injectClientIdentityHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }
@@ -360,6 +364,9 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 		if a.UID != "" {
 			req.Header.Set("X-User-Id", a.UID)
 		}
+		// X-Client-*：真机渲染器/Node 族的 /v2/report 同样齐带三头（按 realm 隔离）。
+		// 旧浏览器形态（WB2_REPORT_LEGACY=1）不走这里，保持原有的回滚头集。
+		c.injectClientIdentityHeaders(req, a)
 	}
 	_, err = c.doJSON(req)
 	return err

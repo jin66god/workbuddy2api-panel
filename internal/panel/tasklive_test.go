@@ -43,7 +43,9 @@ func liveResp(status int, body string) *http.Response {
 func TestLiveTasksOfCounts(t *testing.T) {
 	var sawMP bool
 	c := liveClient(func(r *http.Request) (*http.Response, error) {
-		if r.Header.Get("X-Client-Platform") != "" {
+		// 按取值认，不按「有这个头」认：桌面端身份头也会带 X-Client-Platform
+		// （取值 windows），只有 miniprogram 才是小程序口径。
+		if r.Header.Get("X-Client-Platform") == "miniprogram" {
 			sawMP = true
 		}
 		// 夹具用真实字段：claimed 由 accept_status 判定，claimable 由进度达标推算，
@@ -71,7 +73,7 @@ func TestLiveTasksOfCounts(t *testing.T) {
 // TestLiveTasksOfFallsBackToDefault mp 口径失败时回落默认口径，而不是整行报错。
 func TestLiveTasksOfFallsBackToDefault(t *testing.T) {
 	c := liveClient(func(r *http.Request) (*http.Response, error) {
-		if r.Header.Get("X-Client-Platform") != "" {
+		if r.Header.Get("X-Client-Platform") == "miniprogram" {
 			return liveResp(400, `{"code":400,"msg":"unsupported"}`), nil
 		}
 		return liveResp(200, `{"code":0,"data":{"tasks":[{"task_code":"only_default"}]}}`), nil

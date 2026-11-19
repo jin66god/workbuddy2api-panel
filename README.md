@@ -182,7 +182,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 原生 tool_calls 还原 | 上游标记文本在客户端未声明 `tools` 时还原为结构化 `tool_calls`（流式 / 非流式） |
 | 推理模型兼容 | DeepSeek 思维链注入、`reasoning_content` 回填、effort 档位降级、`reasoning_text` 剥离 |
 | 渠道校验形态 | 首条非 system 自动补 system（`developer` 就地归一）+ 会话头三件套缺失兜底，从源头避免 `11-128 first message is not system prompt` / `conversation id missing` |
-| 出站指纹 | UA 按 realm 分档（CN `WorkBuddy/5.11.3` + CLI `2.176.0`、global `workbuddy-ai/5.9.4` + CLI `2.165.0`），global chat 补 `X-Private-Data`，对齐官方客户端抓包 |
+| 出站指纹 | UA 按 realm 分档（CN `WorkBuddy/5.11.3` + CLI `2.176.0`、global `workbuddy-ai/5.9.4` + CLI `2.165.0`），CN 全链路补桌面端身份三头 `X-Client-Version` / `X-Client-Platform` / `X-Client-Product`（global 与小程序口径不发），global chat 补 `X-Private-Data`，对齐官方客户端抓包 |
 | 缓存命中修复 | 补齐 body 级 `conversation_id`，修前缀缓存整段未命中 |
 
 ### 账号池与稳定性
@@ -1108,7 +1108,7 @@ http://127.0.0.1:7863/panel/
 | `activity/growth/tasks/accept` | POST | 接受任务（`{"task_codes":[...]}`） |
 | `activity/growth/tasks/<task_code>/claim` | POST | **领取任务奖励**（任务码在路径、无 body；**Web 域 `www.workbuddy.cn`**，非 CLI 域——这是领奖能成功的关键） |
 
-出站请求按账号身份携带三段式 UA（CN `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，global `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`，可被 `upstream.user_agent` 整体覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
+出站请求按账号身份携带三段式 UA（CN `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，global `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`，可被 `upstream.user_agent` 整体覆盖）；CN 账号在 chat / 刷新 / 计费 / 上级上报等全部出站路径上另带桌面端身份三头（`X-Client-Version` = 当前客户端版本、`X-Client-Platform: windows`、`X-Client-Product: WorkBuddy`），global 一条都不发，小程序口径（成长任务 mp 路径）会先撤掉这三头再打 `X-Client-Platform: miniprogram`；需要整体退回「只对齐版本号」的旧头集时设 `WB2_NO_CLIENT_IDENTITY=1`。聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
 
 ## 请求级日志
 

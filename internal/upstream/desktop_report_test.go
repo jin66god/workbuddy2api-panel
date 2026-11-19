@@ -10,8 +10,13 @@ import (
 )
 
 // TestReportWebEventNodeShape /v2/report 必须是官方 Node 形态：
-// 不带 Origin / Referer / x-client-platform / sec-ch-*，带 X-Domain / X-Product /
+// 不带 Origin / Referer / sec-ch-* 这类**浏览器族**头，带 X-Domain / X-Product /
 // X-Request-ID（32 位 hex）。往这条链补浏览器头反而是破功。
+//
+// X-Client-Platform 不再按「有这个头」判：桌面端共享 HTTP 层在 5.11.3 起会按
+// origin 注入 X-Client-* 三头（含本路径），真机形态是 `windows`；浏览器族才用
+// `web`。所以判据改为「取值不能是 web」，既保住「别退回浏览器族」的原意，也不再
+// 拦住与版本号同源的桌面身份头。
 func TestReportWebEventNodeShape(t *testing.T) {
 	old := t.TempDir()
 	_ = old
@@ -31,10 +36,14 @@ func TestReportWebEventNodeShape(t *testing.T) {
 	if err := c.ReportWebEvent(a, "web_element_click", "https://www.workbuddy.cn/lib", "el1", "文档"); err != nil {
 		t.Fatalf("ReportWebEvent: %v", err)
 	}
-	for _, banned := range []string{"Origin", "Referer", "X-Client-Platform", "Sec-Ch-Ua", "Sec-Fetch-Site"} {
+	for _, banned := range []string{"Origin", "Referer", "Sec-Ch-Ua", "Sec-Fetch-Site"} {
 		if v := got.Get(banned); v != "" {
 			t.Errorf("%s = %q，官方 report 不发这个头", banned, v)
 		}
+	}
+	// 浏览器族标志：platform 只能是桌面端取值，不能退回 web。
+	if v := got.Get("X-Client-Platform"); v != "" && v != "windows" {
+		t.Errorf("X-Client-Platform = %q，桌面端形态只能是 windows 或留空（浏览器族才发 web）", v)
 	}
 	if got.Get("X-Product") != "SaaS" {
 		t.Errorf("X-Product = %q want SaaS", got.Get("X-Product"))

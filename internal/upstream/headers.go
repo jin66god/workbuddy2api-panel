@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -40,6 +41,17 @@ const (
 	defaultCliVersionGlobal = "2.165.0"
 	// defaultCliVersion CN 口径别名（兼容既有调用与测试）。
 	defaultCliVersion = defaultCliVersionCN
+
+	// defaultClientIdentityPlatform / defaultClientIdentityProduct 桌面端
+	// X-Client-* 三头里除版本段外的两段固定值：真机国内版全量样本恒为
+	// windows / WorkBuddy（mac 包会是 macos；产品名取 product config 的
+	// applicationName）。版本段不在这里，按账号 realm 走 clientVersionFor。
+	defaultClientIdentityPlatform = "windows"
+	defaultClientIdentityProduct  = "WorkBuddy"
+
+	// noClientIdentityEnv 关闭 X-Client-* 三头注入的逃生开关（见
+	// injectClientIdentityHeaders）。默认不设 = 按 realm 注入。
+	noClientIdentityEnv = "WB2_NO_CLIENT_IDENTITY"
 
 	originRefererCN     = "https://www.workbuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -98,6 +110,50 @@ func (c *Client) cliVersionFor(a *auth.Auth) string {
 		return defaultCliVersionGlobal
 	}
 	return defaultCliVersionCN
+}
+
+// injectClientIdentityHeaders 注入桌面端新增的 X-Client-* 三头。
+//
+// **只对国内版发，国际版一律不发**。两侧分发包不同：国际版停在 5.9.4，其
+// app.asar 没有这层出站头注入（proxy-env2 的 registerOutboundHeaderProvider），
+// 官方国际客户端从不发这三个头；把国内的形态套到国际链路等于给那条链加一层它
+// 不存在的指纹。版本号（UA / X-IDE-Version）本来就按 realm 各取各的，头集也必须
+// 各归各的。
+//
+// 覆盖范围：注入点在客户端共享 HTTP 层、按 origin 判定而非按路径，所以 RPC 族
+// （chat / refresh / v3-config / console / report / billing）全带——这也是把它放在
+// CommonHeaders 与 BillingHeaders 的原因（两处起头即覆盖全出站），其余独立起头的
+// 请求（桌面端上报、v3 目录探测、活动上报）逐个挂载。
+//
+// X-Device-Token 不在这里补：它的取值只有客户端 Turing SDK 能产，网关侧没有等价
+// 来源，凭空造一个反而更可疑；账号配了 device_token 时由 injectDeviceToken 在它
+// 自己的调用点注入。
+func (c *Client) injectClientIdentityHeaders(req *http.Request, a *auth.Auth) {
+	if a == nil || a.IsGlobal() {
+		return
+	}
+	// 逃生开关：头集一旦被上游按新形态判定为异常，可以用 WB2_NO_CLIENT_IDENTITY=1
+	// 整体退回「只对齐版本号、不发这三头」的旧形态，不必回滚二进制。
+	if os.Getenv(noClientIdentityEnv) == "1" {
+		return
+	}
+	req.Header.Set("X-Client-Version", c.clientVersionFor(a))
+	req.Header.Set("X-Client-Platform", defaultClientIdentityPlatform)
+	req.Header.Set("X-Client-Product", defaultClientIdentityProduct)
+}
+
+// dropClientIdentityHeaders 撤掉 injectClientIdentityHeaders 注入的三头，供
+// **小程序口径**的请求使用（tasks.go 的 growthJSONMP / ClaimRewardMP）。
+//
+// 为什么必须撤：这三个头来自桌面端共享 HTTP 层，小程序那条链路根本不存在这一层。
+// mp 路径都是先 BillingHeaders（CN 号会打上三头）再覆盖
+// X-Client-Platform: miniprogram，不撤就会发出 `5.11.3 / miniprogram / WorkBuddy`
+// ——桌面端不会说 miniprogram，小程序也不会自报 5.11.3 与 WorkBuddy（真机小程序是
+// workbuddy-mp 那一族），是个谁都不像的第四种组合。
+func (c *Client) dropClientIdentityHeaders(req *http.Request) {
+	req.Header.Del("X-Client-Version")
+	req.Header.Del("X-Client-Platform")
+	req.Header.Del("X-Client-Product")
 }
 
 // defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
@@ -207,6 +263,10 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("User-Agent", c.userAgent(a))
+	// X-Client-*：桌面端共享 HTTP 层按 origin 注入的身份三头（按 realm 隔离，
+	// 国际版不发）。放在 CommonHeaders 是因为 chat / refresh / v3-config / console
+	// 各族都从这里起头，一处覆盖 RPC 层全部路径。
+	c.injectClientIdentityHeaders(req, a)
 	// X-CodeBuddy-Request: 1（官方客户端风控闸门头，所有 API 请求必带，D1）。
 	req.Header.Set("X-CodeBuddy-Request", "1")
 	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
@@ -465,6 +525,8 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	}
 	// 设备风控头：billing 域（report/travel/balance/checkin）同样注入。
 	c.injectDeviceToken(req, a)
+	// X-Client-* 身份头：billing 域真机同样带，与 RPC 层同口径按 realm 隔离。
+	c.injectClientIdentityHeaders(req, a)
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
