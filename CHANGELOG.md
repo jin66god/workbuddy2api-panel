@@ -1,3 +1,13 @@
+## 未发布
+
+### 修复
+
+- **Responses 流被输出上限截断时，不再伪装成正常完成**：`/v1/responses` 的流式收束此前只把
+  `response.status` 写成 `incomplete`，事件名仍发 `response.completed`。客户端按**事件类型**判定
+  收尾，于是把「被截断」当成这一轮正常结束——既不提示、也不再续跑，表现为任务做到一半停住、
+  必须手动发一句「继续」。现在截断统一以 `response.incomplete` 收束（`incomplete_details.reason`
+  仍为 `max_output_tokens`），并补一条 WARN 便于在运行日志里区分「截断」与「模型自己停」。
+
 ## v1.27.14（2026-11-19）
 
 ### 修复

@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -1137,14 +1138,21 @@ func (e *responsesEmitter) finish() {
 		return
 	}
 	status := "completed"
+	event := "response.completed"
 	if e.finishReason == "length" {
 		status = "incomplete"
+		// OpenAI Responses 流式协议里「被截断」是独立事件 response.incomplete。
+		// 只把 status 写成 incomplete、事件名仍发 response.completed 时，客户端按
+		// **事件类型**判定收尾：Codex 一类客户端会把这轮当正常结束，既不提示截断也
+		// 不再续跑——用户看到的就是「任务没做完直接结束，要手动发继续」。
+		event = "response.incomplete"
+		log.Printf("WARN: [responses] 上游以 finish_reason=length 收尾，已按 response.incomplete 收束（正文可能被输出上限截断）")
 	}
 	if e.silent {
 		e.final = e.shell(status)
 		return
 	}
-	e.emit("response.completed", map[string]any{"response": e.shell(status)})
+	e.emit(event, map[string]any{"response": e.shell(status)})
 }
 
 // itemObject 产出单个 output item 的完整形态（用于 *.done 与 output[]）。
