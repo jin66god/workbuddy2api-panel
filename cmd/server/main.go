@@ -35,7 +35,7 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.27.15-panel"
+const appVersion = "1.27.16-panel"
 
 // insecureKeyWarning 空 api_key = 完全不鉴权（httpauth.VerifyBearer 对空 key 恒放
 // 行），样例占位符 test_key = 人尽皆知的弱密钥；叠加非回环监听（缺省 ":7863" 绑
@@ -176,8 +176,13 @@ func main() {
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
 	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
-	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
-		tr.ResponseHeaderTimeout = up.HeaderTimeout
+	// issue #12：Transport 外层包了 headerCaseTripper（值类型），直接断言
+	// `.(*http.Transport)` 恒失败、赋值被静默跳过，配置长期不生效（首包恒 60s）。
+	// 改为由 upstream 剥包装写入；写不进去必须留日志，不能再静默。
+	if !upstream.SetChatHeaderTimeout(up.ChatHTTP.Transport, up.HeaderTimeout) {
+		log.Printf("WARN: [server] chat 首包超时未能写入传输层（Transport 包装类型变化？），"+
+			"upstream.header_timeout_seconds=%d 不会生效，实际沿用默认值；请连同本行反馈",
+			cfg.Upstream.HeaderTimeoutSeconds)
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second

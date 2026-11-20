@@ -48,6 +48,43 @@ const (
 	responseHeaderTimeout = 60 * time.Second
 )
 
+// SetChatHeaderTimeout 把聊天 SSE 的首包（响应头）超时写进连接层。
+//
+// 为什么需要这个函数而不是让调用方直接断言：`Client.ChatHTTP.Transport` 外层包了
+// `headerCaseTripper`（值类型，见 client.go 的 New），`rt.(*http.Transport)` 永远
+// 断言失败，赋值被静默跳过——生产上 `upstream.header_timeout_seconds` 因此长期
+// 不生效，首包恒为 60s（issue #12）。这里统一剥包装再写，返回是否真的写进去，
+// 调用方据此打日志，避免下次包装层变化又变成静默失效。
+func SetChatHeaderTimeout(rt http.RoundTripper, d time.Duration) bool {
+	if d <= 0 {
+		return false
+	}
+	tr := underlyingHTTPTransport(rt)
+	if tr == nil {
+		return false
+	}
+	tr.ResponseHeaderTimeout = d
+	return true
+}
+
+// underlyingHTTPTransport 剥掉出站包装（headerCaseTripper 等）拿到 *http.Transport。
+// 包装层可能有多层，上限 8 层防意外环。
+func underlyingHTTPTransport(rt http.RoundTripper) *http.Transport {
+	for i := 0; i < 8 && rt != nil; i++ {
+		switch v := rt.(type) {
+		case *http.Transport:
+			return v
+		case headerCaseTripper:
+			rt = v.base
+		case *headerCaseTripper:
+			rt = v.base
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 // maxIdleConns / maxIdleConnsPerHost 连接池容量（既有值，一并集中定义）。
 const (
 	maxIdleConns        = 100

@@ -182,6 +182,9 @@ type Handler struct {
 	// cacheAff 会话级缓存亲和（cache_affinity.go）：粘性解绑后优先回到缓存还热着
 	// 的那个号，避免几十万 token 前缀重算。仅在无粘性绑定时提供候选。
 	cacheAff *cacheAffinity
+	// chatTimeouts 「会话 + 账号」首包超时连续计数（chat_timeout.go，issue #13）：
+	// 连续 N 次判定该号慢 → 解绑粘性与缓存亲和，让下一轮重新选号。
+	chatTimeouts *chatTimeoutStreak
 }
 
 // NewHandler 构建 handler。
@@ -198,7 +201,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), cacheAff: newCacheAffinity(cacheAffinityTTL, cacheAffinityMax)}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), cacheAff: newCacheAffinity(cacheAffinityTTL, cacheAffinityMax), chatTimeouts: newChatTimeoutStreak(10 * time.Minute)}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// OpenAI Responses 协议（Codex CLI 等只走这条）：入站翻成 chat 体后复用同一条
 	// 链路，出站把 chat SSE 翻回 Responses 事件流（见 responses.go）。
@@ -1247,6 +1250,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
 				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
 					logfmt.Label(acct.UID, acct.Nickname), terr)
+				// issue #13：全局慢时不轮转是对的，但「单账号/单模型慢」与全局慢无法区分，
+				// 粘性会让会话永远钉在同一个号上反复撞满额超时。这里只计数：
+				// 同一会话在同一账号上连续 N 次首包超时后解绑粘性与缓存亲和，
+				// 下一次请求重新选号；账号本身不记连败、不进冷却。
+				if bindKey != "" && h.chatTimeouts != nil {
+					streakKey := bindKey + "|" + acct.UID
+					if n := h.chatTimeouts.note(streakKey); n >= upstreamTimeoutUnbindStreak {
+						if h.cfg.Session != nil {
+							h.cfg.Session.Unbind(bindKey)
+						}
+						if h.cacheAff != nil {
+							h.cacheAff.forget(bindKey)
+						}
+						h.chatTimeouts.reset(streakKey)
+						log.Printf("WARN: [server] 会话连续 %d 次首包超时（acct=%s）→ 已解绑粘性与缓存亲和，下轮重新选号（账号不记失败，bind长度=%d）",
+							n, logfmt.Label(acct.UID, acct.Nickname), len(bindKey))
+					}
+				}
 				break
 			}
 			// 网络层抖动：归因到**出口**，不记到号上（egress.go）。
@@ -1560,6 +1581,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
+			// 首包已到 → 「同会话同账号连续首包超时」计数清零（issue #13）。
+			if bindKey != "" && h.chatTimeouts != nil {
+				h.chatTimeouts.reset(bindKey + "|" + acct.UID)
+			}
 			stats := newChatStatsReaderSince(rc, st.start)
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
@@ -1724,6 +1749,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
+		if bindKey != "" && h.chatTimeouts != nil {
+			h.chatTimeouts.reset(bindKey + "|" + acct.UID)
+		}
 		st.outcome = reqlog.OutcomeSuccess
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
