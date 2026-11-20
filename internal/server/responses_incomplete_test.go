@@ -66,3 +66,67 @@ func TestResponsesStreamCompletedOnStop(t *testing.T) {
 		t.Errorf("正常收尾不得发 response.incomplete（names=%v）", names)
 	}
 }
+
+// 只有思考、没有正文与工具调用时必须是 response.failed，而不是 completed。
+// 参考 misakano7545 fork 的 empty_reasoning_only 判据（线上高频形态：模型把整轮
+// 预算花在思考上，Agent 客户端看到 completed 就收尾，用户只能手动喊「继续」）。
+func TestResponsesReasoningOnlyFails(t *testing.T) {
+	const sse = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"先想一会儿\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":12,\"total_tokens\":22}}\n\n" +
+		"data: [DONE]\n\n"
+
+	h := newResponsesHandler(t, func(authz string) (int, string, bool) { return 200, sse, true })
+	rec := doResponses(t, h, `{"model":"glm-5.2","input":"把仓库重构一遍","stream":true}`)
+	events := parseResponsesEvents(t, rec.Body.String())
+	last := events[len(events)-1]
+	if last["type"] != "response.failed" {
+		t.Fatalf("末事件=%v want response.failed（names=%v）", last["type"], eventNames(events))
+	}
+	resp, _ := last["response"].(map[string]any)
+	errObj, _ := resp["error"].(map[string]any)
+	if code, _ := errObj["code"].(string); code != "empty_reasoning_only" {
+		t.Errorf("error.code=%v want empty_reasoning_only", errObj["code"])
+	}
+}
+
+// 内容过滤截断同样是 incomplete，且理由要如实写 content_filter。
+func TestResponsesContentFilterIncomplete(t *testing.T) {
+	const sse = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"half\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	h := newResponsesHandler(t, func(authz string) (int, string, bool) { return 200, sse, true })
+	rec := doResponses(t, h, `{"model":"glm-5.2","input":"x","stream":true}`)
+	events := parseResponsesEvents(t, rec.Body.String())
+	last := events[len(events)-1]
+	if last["type"] != "response.incomplete" {
+		t.Fatalf("末事件=%v want response.incomplete（names=%v）", last["type"], eventNames(events))
+	}
+	resp, _ := last["response"].(map[string]any)
+	det, _ := resp["incomplete_details"].(map[string]any)
+	if reason, _ := det["reason"].(string); reason != "content_filter" {
+		t.Errorf("incomplete_details.reason=%q want content_filter", reason)
+	}
+}
+
+// 截断时 output item 自身也要标 incomplete：客户端据此知道这条没写完，
+// 不会把半截参数当完整调用去执行。
+func TestResponsesTruncatedItemStatus(t *testing.T) {
+	const sse = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"写到一半\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	h := newResponsesHandler(t, func(authz string) (int, string, bool) { return 200, sse, true })
+	rec := doResponses(t, h, `{"model":"glm-5.2","input":"写长文","stream":true}`)
+	events := parseResponsesEvents(t, rec.Body.String())
+	last := events[len(events)-1]
+	resp, _ := last["response"].(map[string]any)
+	out, _ := resp["output"].([]any)
+	if len(out) == 0 {
+		t.Fatal("output 为空")
+	}
+	item, _ := out[0].(map[string]any)
+	if item["status"] != "incomplete" {
+		t.Errorf("output[0].status=%v want incomplete", item["status"])
+	}
+}

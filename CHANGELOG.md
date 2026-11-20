@@ -2,11 +2,35 @@
 
 ### 修复
 
-- **Responses 流被输出上限截断时，不再伪装成正常完成**：`/v1/responses` 的流式收束此前只把
-  `response.status` 写成 `incomplete`，事件名仍发 `response.completed`。客户端按**事件类型**判定
-  收尾，于是把「被截断」当成这一轮正常结束——既不提示、也不再续跑，表现为任务做到一半停住、
-  必须手动发一句「继续」。现在截断统一以 `response.incomplete` 收束（`incomplete_details.reason`
-  仍为 `max_output_tokens`），并补一条 WARN 便于在运行日志里区分「截断」与「模型自己停」。
+- **Responses 流的收尾语义与客户端判定对齐**：`/v1/responses` 此前只把 `response.status` 写成
+  `incomplete`，事件名仍发 `response.completed`。客户端按**事件类型**判收尾，于是把「被截断」
+  当成正常结束——不提示、不再续跑，表现为任务做到一半停住、必须手动发一句「继续」。现在：
+  ① 截断（`length` / `max_tokens` / `content_filter`）统一以 `response.incomplete` 收束，
+  `incomplete_details.reason` 如实区分 `max_output_tokens` 与 `content_filter`，output item 自身
+  也标 `incomplete`；
+  ② **只有思考、没有正文也没有工具调用**时改判 `response.failed`（`empty_reasoning_only`），
+  不再发 completed——那种形态本质是「想完但没产出」，发 completed 会让 Agent 客户端以为这轮
+  没什么要说的、直接收尾；
+  ③ 截断时补一条 WARN，便于在运行日志里区分「额度截断」与「模型自己停」；
+  ④ 上游给了工具调用分片却缺函数名时补一条 WARN，避免「工具调用被丢掉」在日志里完全无痕；
+  ⑤ 客户端声明 `custom(freeform)` / `namespace` / 托管类工具时不再一律丢弃（见下条）。
+
+### 新增
+
+- **`/v1/responses` 支持 `custom(freeform)` 与 `namespace` 工具**：Codex 的 `apply_patch`
+  声明的是 `{"type":"custom","name":"apply_patch"}`，此前被当成不支持的类型直接丢掉——模型
+  没有可调用的补丁工具，只能把改动当正文说出来，客户端看到「模型说一句就停」，任务做一半
+  要人手动发继续。现在：
+  - custom 工具降级成「单 `input` 参数」的 function 送给上游（描述里追加 freeform 提示与
+    grammar 原文），回程还原成 `custom_tool_call` item 与 `custom_tool_call_input.*` 事件；
+  - 载荷形态不可信（多键 JSON / 非字符串 / 半截）时 item 标 `incomplete` 且不下发内容——
+    freeform 载荷会被客户端直接执行（打补丁），宁可让它看到失败；
+  - `namespace` 工具组摊成扁平 function（重名加稳定后缀并登记还原表），回程把模型的
+    `ns__name` / `ns::name` 还原成 `name` + `namespace`，客户端按二元组才能派发到执行器；
+  - 历史 input 里的 `custom_tool_call` / `custom_tool_call_output` 一并映射成 chat 的
+    `tool_calls` 与 `tool` 消息，多轮重放不再丢上下文；
+  - 托管工具（`web_search` / `image_generation`）仍不下发（本库没有对应执行器），但会留
+    一条 WARN 说明被忽略，不再静默消失。
 
 ## v1.27.14（2026-11-19）
 

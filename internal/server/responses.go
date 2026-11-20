@@ -30,6 +30,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -87,6 +88,52 @@ type responsesPlan struct {
 	metadata          map[string]any
 	// previousResponseID 仅用于错误文案（收到即 400，不进入后续链路）。
 	previousResponseID string
+	// customTools 客户端声明为 custom(freeform) 的工具名（Codex 的 apply_patch 就是它）。
+	// 上游没有 freeform 概念，只能降级成单 input 参数的 function 送上去，回程再还原成
+	// custom_tool_call —— 否则模型把载荷当普通文本吐出来，客户端永远收不到工具调用，
+	// 表现为「模型说一句就停、任务做一半」。
+	customTools map[string]bool
+	// nsMap 出站扁平名 -> namespace（新版 Codex App 用 namespace 声明 MCP 工具组）。
+	nsMap map[string]string
+	// alias 出站扁平名 -> 客户端原名（只在重名被加后缀时登记）。
+	alias map[string]string
+}
+
+// isCustomTool 该工具名是否由客户端声明为 custom(freeform)。
+func (p *responsesPlan) isCustomTool(name string) bool {
+	return p != nil && p.customTools[name]
+}
+
+// restoreToolName 回程把模型用的出站名还原成客户端声明的名字与 namespace。
+// 模型可能按 ns__name / ns::name 回名，这里统一剥成裸名并补 namespace ——
+// 客户端是按 (name, namespace) 二元组派发执行器的，缺 namespace 会找不到工具。
+func (p *responsesPlan) restoreToolName(raw string) (name, ns string) {
+	name = strings.TrimSpace(raw)
+	if p == nil || name == "" {
+		return name, ""
+	}
+	if i := strings.Index(name, "::"); i > 0 {
+		head, tail := name[:i], name[i+2:]
+		if mapped, ok := p.nsMap[tail]; ok {
+			name, ns = tail, mapped
+		} else {
+			name, ns = tail, head
+		}
+	} else {
+		for tool, tns := range p.nsMap {
+			if name == tns+nsSep+tool {
+				name, ns = tool, tns
+				break
+			}
+		}
+	}
+	if ns == "" {
+		ns = p.nsMap[name]
+	}
+	if orig, ok := p.alias[name]; ok {
+		name = orig
+	}
+	return name, ns
 }
 
 // errResponsesUnsupported 表示请求形态合法但本适配器有意不支持（回 400，可读文案）。
@@ -160,11 +207,14 @@ func responsesToChat(body []byte) ([]byte, *responsesPlan, error) {
 		chat["tool_choice"] = tc
 		plan.toolChoiceEcho = responsesToolChoiceEcho(req.ToolChoice)
 	}
-	if tools, echo, err := responsesTools(req.Tools); err != nil {
+	if tp, err := responsesTools(req.Tools); err != nil {
 		return nil, nil, err
-	} else if len(tools) > 0 {
-		chat["tools"] = tools
-		plan.toolsEcho = echo
+	} else if len(tp.out) > 0 {
+		chat["tools"] = tp.out
+		plan.toolsEcho = tp.echo
+		plan.customTools = tp.custom
+		plan.nsMap = tp.nsMap
+		plan.alias = tp.alias
 	}
 	if rf := responsesResponseFormat(req.Text); rf != nil {
 		chat["response_format"] = rf
@@ -267,9 +317,13 @@ func responsesMessages(req responsesRequest) ([]any, error) {
 				return nil, err
 			}
 			out = append(out, map[string]any{"role": role, "content": content})
-		case "function_call":
+		case "function_call", "custom_tool_call":
 			name, _ := it["name"].(string)
 			args, _ := it["arguments"].(string)
+			if it["type"] == "custom_tool_call" {
+				// custom 工具的载荷是自由文本，chat 侧只能塞进单 input 参数。
+				args = marshalCustomInput(it["input"])
+			}
 			callID, _ := it["call_id"].(string)
 			if callID == "" {
 				callID, _ = it["id"].(string)
@@ -288,7 +342,7 @@ func responsesMessages(req responsesRequest) ([]any, error) {
 					"arguments": args,
 				},
 			})
-		case "function_call_output":
+		case "function_call_output", "custom_tool_call_output":
 			flushCalls()
 			callID, _ := it["call_id"].(string)
 			if callID == "" {
@@ -380,43 +434,309 @@ func responsesToolOutput(v any) string {
 // responsesTools 把 Responses 的扁平工具声明翻成 chat 的嵌套形态。
 // 非 function 类型（web_search / file_search / computer_use …）本库无法执行，
 // 直接剔除：保留会让上游因未知工具类型 400，剔除后至少纯对话与本地工具可用。
-func responsesTools(tools []json.RawMessage) (out []any, echo []any, err error) {
-	for _, raw := range tools {
-		var t map[string]any
-		if err := json.Unmarshal(raw, &t); err != nil {
-			return nil, nil, fmt.Errorf("parse tool: %w", err)
+// ───────────────────────────── 工具形态转换 ─────────────────────────────
+//
+// 客户端（Codex 一类）会声明三类非 function 工具：
+//   - custom(freeform)：只有 name 与自由文本载荷，如 Codex 的 apply_patch。
+//     上游没有 freeform 概念，必须降级成「单 input 参数的 function」再送上去，
+//     回程还原成 custom_tool_call —— 否则模型把载荷当普通文本吐出来，客户端
+//     永远收不到工具调用，表现就是「模型说一句就停、任务做一半要人喊继续」。
+//   - namespace：MCP/插件工具组，子工具要摊成扁平 function，回程补回 namespace。
+//   - 托管（web_search / image_generation）：本库没有执行器，不下发也不吞掉，
+//     留一条 WARN 说明被忽略。
+const (
+	// nsSep 模型把 namespace 拼进函数名时用的分隔符（如 codex_app__list_threads）。
+	nsSep = "__"
+	// namespaceMaxDepth namespace 嵌套展开上限（防深嵌套）。
+	namespaceMaxDepth = 4
+	// customToolHint 追加进 custom 工具描述：告诉模型把原始载荷整段放进 input。
+	customToolHint = "This is a freeform tool: put the complete raw payload, verbatim, " +
+		"into the `input` string parameter. Do not wrap it in extra JSON."
+)
+
+// toolPlan 是工具转换的结果：出站 tools + 回程需要的语义映射。
+type toolPlan struct {
+	out    []any
+	echo   []any
+	custom map[string]bool
+	nsMap  map[string]string
+	alias  map[string]string
+}
+
+func toolString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+// expandNamespaceTools 把 namespace 工具组展开成扁平 function 列表。
+//
+// 组内子工具常无 type 字段，按 function 处理。重名不丢弃：先到者保留原名，
+// 后到者加稳定后缀（read_file_2）并登记还原映射 —— 丢弃等于客户端声明的工具静默消失。
+func expandNamespaceTools(tools []any) ([]any, map[string]string, map[string]string) {
+	flat := []any{}
+	mapping := map[string]string{}
+	alias := map[string]string{}
+	seen := map[string]bool{}
+
+	uniq := func(name string) string {
+		if !seen[name] {
+			seen[name] = true
+			return name
 		}
-		typ, _ := t["type"].(string)
-		if typ != "" && typ != "function" {
+		for i := 2; ; i++ {
+			cand := name + "_" + strconv.Itoa(i)
+			if !seen[cand] {
+				seen[cand] = true
+				alias[cand] = name
+				return cand
+			}
+		}
+	}
+
+	var collect func(entry any, depth int, ns string)
+	collect = func(entry any, depth int, ns string) {
+		if depth > namespaceMaxDepth {
+			return
+		}
+		item, ok := entry.(map[string]any)
+		if !ok {
+			return
+		}
+		etype := strings.ToLower(toolString(item["type"]))
+		if etype == "namespace" {
+			subs, _ := item["tools"].([]any)
+			if subs == nil {
+				subs, _ = item["children"].([]any)
+			}
+			if subs == nil {
+				subs, _ = item["functions"].([]any)
+			}
+			childNS := toolString(item["name"])
+			if childNS == "" {
+				childNS = ns
+			}
+			for _, sub := range subs {
+				collect(sub, depth+1, childNS)
+			}
+			return
+		}
+		if ns != "" && (etype == "" || etype == "function") {
+			fn, _ := item["function"].(map[string]any)
+			if fn == nil {
+				fn = map[string]any{
+					"name":        item["name"],
+					"description": item["description"],
+					"parameters":  firstNonNilAny(item["parameters"], item["input_schema"]),
+				}
+			}
+			name := strings.TrimSpace(toolString(fn["name"]))
+			if name == "" {
+				return
+			}
+			name = uniq(name)
+			mapping[name] = ns
+			params := fn["parameters"]
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			flatFn := map[string]any{
+				"type":        "function",
+				"name":        name,
+				"description": toolString(fn["description"]),
+				"parameters":  params,
+			}
+			if st, ok := fn["strict"]; ok {
+				flatFn["strict"] = st
+			}
+			flat = append(flat, flatFn)
+			return
+		}
+		name := toolString(item["name"])
+		if name == "" {
+			if fn, ok := item["function"].(map[string]any); ok {
+				name = toolString(fn["name"])
+			}
+		}
+		if name != "" {
+			outName := uniq(name)
+			if ns != "" {
+				mapping[outName] = ns
+			}
+			if outName != name {
+				setToolName(item, outName)
+			}
+		}
+		flat = append(flat, item)
+	}
+
+	for _, entry := range tools {
+		collect(entry, 0, "")
+	}
+	return flat, mapping, alias
+}
+
+func firstNonNilAny(vals ...any) any {
+	for _, v := range vals {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
+// setToolName 改写出站工具名：兼容 {"type":"function","function":{...}} 与裸 function 两种形态。
+func setToolName(item map[string]any, name string) {
+	if fn, ok := item["function"].(map[string]any); ok {
+		fn["name"] = name
+		return
+	}
+	item["name"] = name
+}
+
+// downgradeCustomTool 把 custom(freeform) 工具降级成单 input 参数的 chat function 体。
+func downgradeCustomTool(tool map[string]any) map[string]any {
+	extra := ""
+	if format, ok := tool["format"].(map[string]any); ok {
+		if def := toolString(format["definition"]); def != "" {
+			extra = "\n\nGrammar:\n" + def
+		}
+	}
+	return map[string]any{
+		"name":        toolString(tool["name"]),
+		"description": strings.TrimSpace(toolString(tool["description"]) + "\n\n" + customToolHint + extra),
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{
+					"type":        "string",
+					"description": "Complete raw payload for this tool, verbatim.",
+				},
+			},
+			"required": []any{"input"},
+		},
+	}
+}
+
+// unwrapCustomInput 严格还原 freeform 载荷，返回 (载荷, 是否可信)。
+//
+// 只接受 {"input":"<非空字符串>"}（单键）与裸 JSON 字符串。其余（非法 JSON、
+// 多键、input 非字符串、空串）一律不可信 —— custom 的载荷会被客户端直接执行
+// （apply_patch 就是打补丁），宁可让它看到失败，也不能把形态不明或半截的内容
+// 当成可执行调用发出去。
+func unwrapCustomInput(args string) (string, bool) {
+	s := strings.TrimSpace(args)
+	if s == "" {
+		return "", false
+	}
+	var parsed any
+	if json.Unmarshal([]byte(s), &parsed) != nil {
+		return "", false
+	}
+	switch v := parsed.(type) {
+	case string:
+		if v == "" {
+			return "", false
+		}
+		return v, true
+	case map[string]any:
+		if len(v) != 1 {
+			return "", false
+		}
+		in, ok := v["input"].(string)
+		if !ok || in == "" {
+			return "", false
+		}
+		return in, true
+	}
+	return "", false
+}
+
+// marshalCustomInput 把回传的 freeform 输入打包成 chat 工具参数（与降级对称）。
+func marshalCustomInput(v any) string {
+	text, ok := v.(string)
+	if !ok {
+		if v == nil {
+			text = ""
+		} else if b, err := json.Marshal(v); err == nil {
+			text = string(b)
+		}
+	}
+	b, err := json.Marshal(map[string]any{"input": text})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// responsesTools 把 Responses 工具定义转成上游 chat 形态，并带出回程语义
+// （custom 工具名集合、出站名 -> namespace、出站名 -> 客户端原名）。
+func responsesTools(tools []json.RawMessage) (*toolPlan, error) {
+	plan := &toolPlan{
+		out:    []any{},
+		echo:   []any{},
+		custom: map[string]bool{},
+		nsMap:  map[string]string{},
+		alias:  map[string]string{},
+	}
+	if len(tools) == 0 {
+		return plan, nil
+	}
+	raw := make([]any, 0, len(tools))
+	for _, r := range tools {
+		var v any
+		if err := json.Unmarshal(r, &v); err != nil {
+			return nil, fmt.Errorf("parse tool: %w", err)
+		}
+		if m, ok := v.(map[string]any); ok {
+			raw = append(raw, m)
+		}
+	}
+	flat, nsMap, alias := expandNamespaceTools(raw)
+	plan.nsMap, plan.alias = nsMap, alias
+
+	for _, t := range flat {
+		m, ok := t.(map[string]any)
+		if !ok {
 			continue
 		}
-		name, _ := t["name"].(string)
-		if name == "" {
-			// 个别客户端发嵌套形态（{type:function, function:{...}}），兼容一下。
-			if fn, ok := t["function"].(map[string]any); ok {
-				name, _ = fn["name"].(string)
-				// chat 形态与嵌套声明同构：必须保留外层 {type,function} 包装，
-				// 只把内层对象塞进 tools[] 会让上游按「缺 type 的工具」判 400。
-				out = append(out, map[string]any{"type": "function", "function": fn})
-				echo = append(echo, t)
+		typ, _ := m["type"].(string)
+		name, _ := m["name"].(string)
+		switch {
+		case strings.EqualFold(typ, "custom"):
+			if name == "" {
+				return nil, errors.New("custom tool is missing name")
+			}
+			plan.custom[name] = true
+			plan.echo = append(plan.echo, m)
+			plan.out = append(plan.out, map[string]any{"type": "function", "function": downgradeCustomTool(m)})
+		case typ != "" && typ != "function":
+			// 托管工具（web_search / image_generation 等）：本库没有执行器，下发也是空转。
+			// 不静默——客户端声明了却收不到，模型这一轮只能不调工具，任务就停在这。
+			log.Printf("WARN: [responses] 客户端声明了非 function 工具（type=%s name=%q），当前版本不会执行它", typ, name)
+		default:
+			plan.echo = append(plan.echo, m)
+			if fn, ok := m["function"].(map[string]any); ok {
+				// 个别客户端发嵌套形态（{type:function, function:{...}}）：保留外层包装。
+				plan.out = append(plan.out, map[string]any{"type": "function", "function": fn})
 				continue
 			}
-			return nil, nil, errors.New("tool is missing name")
+			if name == "" {
+				return nil, errors.New("tool is missing name")
+			}
+			fn := map[string]any{"name": name}
+			if d, ok := m["description"].(string); ok && d != "" {
+				fn["description"] = d
+			}
+			if params, ok := m["parameters"]; ok && params != nil {
+				fn["parameters"] = params
+			}
+			if strict, ok := m["strict"].(bool); ok {
+				fn["strict"] = strict
+			}
+			plan.out = append(plan.out, map[string]any{"type": "function", "function": fn})
 		}
-		fn := map[string]any{"name": name}
-		if d, ok := t["description"].(string); ok && d != "" {
-			fn["description"] = d
-		}
-		if params, ok := t["parameters"]; ok && params != nil {
-			fn["parameters"] = params
-		}
-		if strict, ok := t["strict"].(bool); ok {
-			fn["strict"] = strict
-		}
-		out = append(out, map[string]any{"type": "function", "function": fn})
-		echo = append(echo, t)
 	}
-	return out, echo, nil
+	return plan, nil
 }
 
 // responsesToolChoice 把 Responses 的 tool_choice 翻成 chat 形态（上游只认字符串或
@@ -769,6 +1089,14 @@ type respItem struct {
 	callID string
 	name   string
 	out    int
+	// custom 客户端把该工具声明为 custom(freeform)：回程要发 custom_tool_call 类 item
+	// 与 custom_tool_call_input.* 事件（载荷是自由文本，不是 JSON 参数）。
+	custom bool
+	// ns namespace（MCP/插件工具组）：客户端按 (name, namespace) 派发执行器。
+	ns string
+	// badInput custom 工具载荷形态不可信（多键 / 非字符串 / 半截 JSON）：item 标
+	// incomplete，客户端不会把它当可执行调用。
+	badInput bool
 
 	text      strings.Builder // message 正文 / reasoning 摘要 / function_call 参数
 	partAdded bool
@@ -799,8 +1127,9 @@ type responsesEmitter struct {
 	tools     map[int]*respItem
 	toolOrder []int
 
-	usage        map[string]any
-	finishReason string
+	usage            map[string]any
+	finishReason     string
+	incompleteReason string // 截断原因：max_output_tokens / content_filter
 
 	started bool
 	silent  bool // 非流式：只累积，不写任何事件
@@ -1011,26 +1340,45 @@ func (e *responsesEmitter) toolDelta(tc map[string]any) {
 		if callID == "" {
 			callID = responsesID("call_")
 		}
-		it = &respItem{kind: "function_call", id: responsesID("fc_"), callID: callID, name: name, out: len(e.items)}
+		// 模型可能按 ns__name 回名：先还原客户端声明的名字与 namespace，再判 custom。
+		// namespace 必须在 added 事件就带上——客户端从 added 派发执行器。
+		var ns string
+		name, ns = e.plan.restoreToolName(name)
+		it = &respItem{kind: "function_call", id: responsesID("fc_"), callID: callID, name: name, out: len(e.items), ns: ns}
+		it.custom = e.plan.isCustomTool(name)
 		e.items = append(e.items, it)
 		e.tools[idx] = it
 		e.toolOrder = append(e.toolOrder, idx)
+		added := map[string]any{
+			"id": it.id, "status": "in_progress", "call_id": it.callID, "name": it.name,
+		}
+		if it.custom {
+			added["type"], added["input"] = "custom_tool_call", ""
+		} else {
+			added["type"], added["arguments"] = "function_call", ""
+		}
+		if it.ns != "" {
+			added["namespace"] = it.ns
+		}
 		e.emit("response.output_item.added", map[string]any{
 			"output_index": it.out,
-			"item": map[string]any{
-				"id": it.id, "type": "function_call", "status": "in_progress",
-				"arguments": "", "call_id": it.callID, "name": it.name,
-			},
+			"item":         added,
 		})
 	} else if it.name == "" && name != "" {
-		it.name = name
+		it.name, it.ns = e.plan.restoreToolName(name)
+		it.custom = e.plan.isCustomTool(it.name)
 	}
 	if callID != "" && it.callID == "" {
 		it.callID = callID
 	}
 	if argsChunk != "" {
 		it.text.WriteString(argsChunk)
-		e.emit("response.function_call_arguments.delta", map[string]any{
+		// custom 工具走 input 语义事件，不是 arguments。
+		ev := "response.function_call_arguments.delta"
+		if it.custom {
+			ev = "response.custom_tool_call_input.delta"
+		}
+		e.emit(ev, map[string]any{
 			"item_id": it.id, "output_index": it.out, "delta": argsChunk,
 		})
 	}
@@ -1086,6 +1434,38 @@ func (e *responsesEmitter) closeTools() {
 			continue
 		}
 		it.closed = true
+		if strings.TrimSpace(it.name) == "" {
+			// 上游给了一串 tool_calls 分片却从不带 function.name：拼不出合法
+			// function_call item，客户端会静默丢掉它，表现为「模型说完一句就停」，
+			// 而网关日志原本一片干净、排障时完全看不出工具调用被丢了。
+			log.Printf("WARN: [responses] 上游给了工具调用但缺函数名（call_id=%s）：该 function_call 无法还原成合法 item，客户端会忽略它", it.callID)
+		}
+		if it.custom {
+			// freeform 载荷会被客户端直接执行（apply_patch 就是打补丁）：形态不明
+			// 或半截的内容一律按不可执行下发 —— 用 item 的 status=incomplete 表达，
+			// 客户端不会执行未完成的调用。delta 已经流出去的收不回来，只能这样兜。
+			input, ok := unwrapCustomInput(it.text.String())
+			status := "completed"
+			if !ok || e.truncated() {
+				if !ok {
+					input = ""
+					it.badInput = true
+				}
+				status = "incomplete"
+				log.Printf("WARN: [responses] custom 调用载荷不可信（call_id=%s ok=%v），按不可执行下发 name=%s", it.callID, ok, it.name)
+			}
+			it.text.Reset()
+			it.text.WriteString(input)
+			e.emit("response.custom_tool_call_input.done", map[string]any{
+				"item_id": it.id, "output_index": it.out, "input": input,
+			})
+			item := e.itemObject(it, true)
+			item["status"] = status
+			e.emit("response.output_item.done", map[string]any{
+				"output_index": it.out, "item": item,
+			})
+			continue
+		}
 		args := it.text.String()
 		if args == "" {
 			args = "{}"
@@ -1129,6 +1509,17 @@ func (e *responsesEmitter) finish() {
 	e.closeReasoning()
 	e.closeMessage()
 	e.closeTools()
+	// 只有思考、没有正文也没有工具调用：说 completed 等于告诉客户端「模型想完了、
+	// 没什么要说的」，Agent 类客户端就此收尾，用户看到的是一条空回复、只能自己再
+	// 催一句。这与「想完但没产出」是失败而非答案这一事实不符，改成 failed 让客户端
+	// 按自己的重试策略重来一次。判据与截断互斥：截断走 incomplete，不在这里抢占。
+	if e.err == nil && e.reasoningOnlyNoOutput() {
+		e.err = map[string]any{
+			"type":    "upstream_error",
+			"code":    "empty_reasoning_only",
+			"message": "upstream returned reasoning without output text; retry",
+		}
+	}
 	if e.err != nil {
 		if e.silent {
 			e.final = nil
@@ -1139,14 +1530,19 @@ func (e *responsesEmitter) finish() {
 	}
 	status := "completed"
 	event := "response.completed"
-	if e.finishReason == "length" {
-		status = "incomplete"
+	switch strings.TrimSpace(e.finishReason) {
+	case "length", "max_tokens":
 		// OpenAI Responses 流式协议里「被截断」是独立事件 response.incomplete。
 		// 只把 status 写成 incomplete、事件名仍发 response.completed 时，客户端按
 		// **事件类型**判定收尾：Codex 一类客户端会把这轮当正常结束，既不提示截断也
 		// 不再续跑——用户看到的就是「任务没做完直接结束，要手动发继续」。
-		event = "response.incomplete"
-		log.Printf("WARN: [responses] 上游以 finish_reason=length 收尾，已按 response.incomplete 收束（正文可能被输出上限截断）")
+		status, event, e.incompleteReason = "incomplete", "response.incomplete", "max_output_tokens"
+	case "content_filter":
+		status, event, e.incompleteReason = "incomplete", "response.incomplete", "content_filter"
+	}
+	if status == "incomplete" {
+		log.Printf("WARN: [responses] 上游以 finish_reason=%s 收尾，已按 response.incomplete 收束（原因 %s）",
+			e.finishReason, e.incompleteReason)
 	}
 	if e.silent {
 		e.final = e.shell(status)
@@ -1155,11 +1551,52 @@ func (e *responsesEmitter) finish() {
 	e.emit(event, map[string]any{"response": e.shell(status)})
 }
 
+// truncated 本轮是否被输出上限 / 内容过滤截断（item 与 response 都要标 incomplete）。
+func (e *responsesEmitter) truncated() bool {
+	switch strings.TrimSpace(e.finishReason) {
+	case "length", "max_tokens", "content_filter":
+		return true
+	}
+	return false
+}
+
+// reasoningOnlyNoOutput 本轮是否「只有思考、没有正文与工具调用」。
+//
+// 线上高频形态：上游把整轮预算花在思考上，正文与工具调用全空。此时发 completed
+// 会被 Agent 客户端当成「模型这一轮没什么要说的」，任务静默停住、要人喊继续。
+// 判据与截断互斥（截断走 incomplete，让客户端知道是额度问题而不是上游故障）。
+func (e *responsesEmitter) reasoningOnlyNoOutput() bool {
+	if e.truncated() {
+		return false
+	}
+	hasReason, hasText, hasTool := false, false, false
+	for _, it := range e.items {
+		switch it.kind {
+		case "reasoning":
+			if strings.TrimSpace(it.text.String()) != "" {
+				hasReason = true
+			}
+		case "function_call":
+			hasTool = true
+		default:
+			if strings.TrimSpace(it.text.String()) != "" {
+				hasText = true
+			}
+		}
+	}
+	return hasReason && !hasText && !hasTool
+}
+
 // itemObject 产出单个 output item 的完整形态（用于 *.done 与 output[]）。
 func (e *responsesEmitter) itemObject(it *respItem, completed bool) map[string]any {
 	st := "in_progress"
 	if completed {
 		st = "completed"
+		// 截断、或 custom 载荷不可信时，item 自身也要标 incomplete：客户端据此知道
+		// 这条 message / function_call 没写完，不会把半截参数当完整调用去执行。
+		if e.truncated() || it.badInput {
+			st = "incomplete"
+		}
 	}
 	switch it.kind {
 	case "reasoning":
@@ -1169,11 +1606,24 @@ func (e *responsesEmitter) itemObject(it *respItem, completed bool) map[string]a
 		}
 		return map[string]any{"id": it.id, "type": "reasoning", "summary": summary}
 	case "function_call":
-		args := it.text.String()
-		return map[string]any{
-			"id": it.id, "type": "function_call", "status": st,
-			"arguments": args, "call_id": it.callID, "name": it.name,
+		if it.custom {
+			obj := map[string]any{
+				"id": it.id, "type": "custom_tool_call", "status": st,
+				"call_id": it.callID, "name": it.name, "input": it.text.String(),
+			}
+			if it.ns != "" {
+				obj["namespace"] = it.ns
+			}
+			return obj
 		}
+		obj := map[string]any{
+			"id": it.id, "type": "function_call", "status": st,
+			"arguments": it.text.String(), "call_id": it.callID, "name": it.name,
+		}
+		if it.ns != "" {
+			obj["namespace"] = it.ns
+		}
+		return obj
 	default:
 		content := []any{}
 		if it.partAdded {
@@ -1224,10 +1674,14 @@ func (e *responsesEmitter) shell(status string) map[string]any {
 		"metadata":    echoOrEmptyMap(e.plan.metadata),
 		"error":       e.err,
 		"incomplete_details": func() any {
-			if status == "incomplete" {
-				return map[string]any{"reason": "max_output_tokens"}
+			if status != "incomplete" {
+				return nil
 			}
-			return nil
+			reason := e.incompleteReason
+			if reason == "" {
+				reason = "max_output_tokens"
+			}
+			return map[string]any{"reason": reason}
 		}(),
 	}
 	if u := e.usagesObject(); u != nil {
