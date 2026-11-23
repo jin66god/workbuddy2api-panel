@@ -639,3 +639,109 @@ func TestPrepareBodyDropsReasoningTextParts(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeSchemaHardening 验证 schema 规整的三条边界：弱类型关键字取值纠偏、
+// 容器键不当关键字、数据关键字不被改写。三者任一失守都会让整颗 tools 被上游 400/11129
+// 否掉，或悄悄改掉模型看到的默认值/枚举值。
+func TestNormalizeSchemaHardening(t *testing.T) {
+	build := func(schema string) map[string]any {
+		t.Helper()
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":` + schema + `}}]}`
+		out := PrepareBodyOptWithEfforts([]byte(body), false, nil)
+		var obj map[string]any
+		if err := json.Unmarshal(out, &obj); err != nil {
+			t.Fatalf("out not json: %v", err)
+		}
+		return obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+	}
+
+	t.Run("weak-typed keyword values coerced", func(t *testing.T) {
+		params := build(`{"type":"object","properties":{"n":{"type":"integer","minimum":"1","maxLength":"8","uniqueItems":"true","readOnly":"false","description":123},"e":{"type":"string","enum":"x"}},"additionalProperties":"false"}`)
+		n := params["properties"].(map[string]any)["n"].(map[string]any)
+		if v, ok := n["minimum"].(float64); !ok || v != 1 {
+			t.Fatalf("minimum 应纠成数值 1，得到 %#v", n["minimum"])
+		}
+		if v, ok := n["maxLength"].(float64); !ok || v != 8 {
+			t.Fatalf("maxLength 应纠成数值 8，得到 %#v", n["maxLength"])
+		}
+		if v, ok := n["uniqueItems"].(bool); !ok || !v {
+			t.Fatalf("uniqueItems 应纠成 true，得到 %#v", n["uniqueItems"])
+		}
+		if v, ok := n["readOnly"].(bool); !ok || v {
+			t.Fatalf("readOnly 应纠成 false，得到 %#v", n["readOnly"])
+		}
+		if _, ok := n["description"]; ok {
+			t.Fatalf("description 非字符串应删键，得到 %#v", n["description"])
+		}
+		if _, ok := params["properties"].(map[string]any)["e"].(map[string]any)["enum"]; ok {
+			t.Fatalf("enum 标量应删键")
+		}
+		if v, ok := params["additionalProperties"].(bool); !ok || v {
+			t.Fatalf("additionalProperties 标量应纠成 false 布尔，得到 %#v", params["additionalProperties"])
+		}
+	})
+
+	t.Run("schema containers keep user names", func(t *testing.T) {
+		bs := string(byte(92))
+		// 容器自身的键是**属性名**：叫 minimum / title / type 时不得被当关键字纠偏或删掉
+		//（否则客户端声明的字段会凭空消失，模型看到的是残 schema）。
+		// dependentRequired 的值是属性名数组，同样不是 schema。
+		// $defs 的子 schema 才是真 schema，里面的 pattern 仍要归一。
+		params := build(`{"type":"object","properties":{"minimum":{"type":"string"},"title":{"type":"number"},"a":{"type":"string"}},"dependentRequired":{"items":["type"]},"$defs":{"sub":{"type":"string","pattern":"^p` + bs + bs + `_q$"}}}`)
+		props := params["properties"].(map[string]any)
+		for _, name := range []string{"minimum", "title"} {
+			if _, ok := props[name].(map[string]any); !ok {
+				t.Fatalf("属性名 %q 被当关键字改写/删除了: %#v", name, props[name])
+			}
+		}
+		dr, ok := params["dependentRequired"].(map[string]any)
+		if !ok {
+			t.Fatalf("dependentRequired 被改写: %#v", params["dependentRequired"])
+		}
+		names, ok := dr["items"].([]any)
+		if !ok || len(names) != 1 {
+			t.Fatalf("dependentRequired.items 应保持属性名数组，得到 %#v", dr["items"])
+		}
+		if names[0] != "type" {
+			t.Fatalf("属性名 type 被改写: %#v", names[0])
+		}
+		sub := params["$defs"].(map[string]any)["sub"].(map[string]any)
+		if got := sub["pattern"]; got != "^p_q$" {
+			t.Fatalf("$defs 子 schema 的 pattern 应归一，得到 %#v", got)
+		}
+	})
+
+	t.Run("data keywords untouched", func(t *testing.T) {
+		bs := string(byte(92))
+		// default / const / enum 里的对象是**数据**：里面的 type/pattern 是取值本身。
+		params := build(`{"type":"object","properties":{"cfg":{"type":"object","default":{"type":"str","pattern":"a` + bs + bs + `_b"},"const":null,"examples":[{"type":"str"}]}}}`)
+		cfg := params["properties"].(map[string]any)["cfg"].(map[string]any)
+		def, ok := cfg["default"].(map[string]any)
+		if !ok {
+			t.Fatalf("default 结构被改: %#v", cfg["default"])
+		}
+		if def["type"] != "str" {
+			t.Fatalf("default 里的 type 是数据，不该被归一: %#v", def["type"])
+		}
+		if want := "a" + bs + "_b"; def["pattern"] != want {
+			t.Fatalf("default 里的 pattern 是数据，不该被改写: %#v", def["pattern"])
+		}
+		if v, ok := cfg["const"]; !ok || v != nil {
+			t.Fatalf("const:null 必须保留，得到 ok=%v v=%#v", ok, v)
+		}
+	})
+
+	t.Run("nil keywords stripped", func(t *testing.T) {
+		params := build(`{"type":"object","properties":{"x":{"type":"string","description":null,"title":null}}}`)
+		x := params["properties"].(map[string]any)["x"].(map[string]any)
+		if _, ok := x["description"]; ok {
+			t.Fatalf("description:null 应删键（上游强类型反序列化会 11129）")
+		}
+		if _, ok := x["title"]; ok {
+			t.Fatalf("title:null 应删键")
+		}
+		if x["type"] != "string" {
+			t.Fatalf("兄弟字段受影响: %#v", x["type"])
+		}
+	})
+}
