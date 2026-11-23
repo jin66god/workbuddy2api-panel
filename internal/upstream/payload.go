@@ -9,8 +9,40 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/loglv"
 	"log"
 	"math"
+	"regexp"
 	"strings"
 )
+
+// reuEscape 匹配 JS 正则里的 \uXXXX / \u{XXXX} 转义：JS 合法，Go 的 RE2 没有 \u，
+// 只有 \x{...}。
+var reuEscape = regexp.MustCompile(`\\u\{([0-9a-fA-F]{1,6})\}|\\u([0-9a-fA-F]{4})`)
+
+// re2Pattern 把 JS 正则里的 \u 转义译成 RE2 认的 \x{...}，并验证译后能被 RE2 编译。
+//
+// 为什么必须译：REA 6.9.0 给每个本地路径字段挂 `^[^\uD800-\uDFFF]*$`（lone surrogate
+// 排除式），上游按 RE2 解析没有 \u 转义 → 400 code=11129「工具定义不合规」，**整颗
+// tools 被拒**，客户端所有工具都用不了。单层转义的（客户端写成 JSON 字符串里的
+// \ud800）经网关 JSON 往返已变成 U+FFFD、本来就能编译，不受影响；受影响的只有双层
+// 转义（客户端序列化时保留了反斜杠，Go 侧拿到字面 \uD800）。
+//
+// 不含 \u 时原样返回 true（正常 pattern 零额外开销，也不做编译验证）；译后仍编不过
+// （混了别的 RE2 不认的语法）返回 false，由调用方丢掉这条 pattern/键——丢它只是放宽
+// 一条本地校验正则，留着等于让整包工具被上游否掉。
+//
+// 已知边界：`\\uD800`（正则里表示字面反斜杠 + "uD800"）会被当成 \u 转义处理。这种写法
+// 在工具 schema 里未见实案，且译后仍能通过编译验证，故不做反向断言。
+func re2Pattern(p string) (string, bool) {
+	if !strings.Contains(p, `\u`) {
+		return p, true
+	}
+	q := reuEscape.ReplaceAllStringFunc(p, func(m string) string {
+		return `\x{` + strings.Trim(m[2:], "{}") + `}`
+	})
+	if _, err := regexp.Compile(q); err != nil {
+		return "", false
+	}
+	return q, true
+}
 
 // PrepareBodyOpt 单 pass 改写；sanitize=false 时行为完全还原（仅强制 stream + 归一化 tool_choice）。
 func PrepareBodyOpt(src []byte, sanitize bool) []byte {
@@ -581,22 +613,35 @@ func normalizeToolPatterns(obj map[string]any) {
 // normalizeSchemaTree 递归归一化工具参数 schema 树：
 //   - pattern 值与 patternProperties 键里的 `\_` → `_`（patternProperties 的键也是正则；
 //     map 键不可原地改，命中时重建该层）；
+//   - pattern 值与 patternProperties 键里的 JS `\uXXXX` / `\u{XXXX}` → RE2 的 `\x{...}`，
+//     译完仍编不过就删掉该 pattern/键（见 re2Pattern）；
 //   - 只有 enum、没有 type 的属性补上可无损推断的类型（见 inferEnumType）。
 func normalizeSchemaTree(node any) {
 	switch n := node.(type) {
 	case map[string]any:
-		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
-			n["pattern"] = strings.ReplaceAll(p, `\_`, `_`)
+		if p, ok := n["pattern"].(string); ok {
+			p = strings.ReplaceAll(p, `\_`, `_`)
+			if fixed, ok := re2Pattern(p); ok {
+				n["pattern"] = fixed
+			} else {
+				delete(n, "pattern")
+			}
 		}
 		if props, ok := n["patternProperties"].(map[string]any); ok {
 			rebuilt := false
 			fixed := make(map[string]any, len(props))
 			for k, v := range props {
-				if strings.Contains(k, `\_`) {
-					k = strings.ReplaceAll(k, `\_`, `_`)
+				nk := strings.ReplaceAll(k, `\_`, `_`)
+				p, ok := re2Pattern(nk)
+				if !ok {
+					// 编不过的正则键留着等于整颗 schema 被上游否掉，丢掉这条约束。
+					rebuilt = true
+					continue
+				}
+				if p != k {
 					rebuilt = true
 				}
-				fixed[k] = v
+				fixed[p] = v
 			}
 			if rebuilt {
 				n["patternProperties"] = fixed

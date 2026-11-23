@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -393,6 +394,68 @@ func TestNormalizeToolPatterns(t *testing.T) {
 		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
 		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "p", "pattern"); got != `^[a-z]+\d_$` {
 			t.Fatalf("clean pattern mutated: %q", got)
+		}
+	})
+
+	t.Run("js \\u escape translated to re2", func(t *testing.T) {
+		// REA 6.9.0 的真实形态：每个本地路径字段都挂 lone-surrogate 排除式。
+		// 双层转义（客户端序列化保留反斜杠）→ Go 侧拿到字面 \uD800，RE2 编译失败
+		// → 上游 400/11129 整颗 tools 被拒。出站前必须译成 \x{...}。
+		bs := string(byte(92))
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string","pattern":"^[^` + bs + bs + `uD800-` + bs + bs + `uDFFF]*$"}}}}}]}` //nolint:lll
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		want := `^[^` + bs + `x{D800}-` + bs + `x{DFFF}]*$`
+		got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "path", "pattern")
+		if got != want {
+			t.Fatalf("pattern = %q, want %q", got, want)
+		}
+		if _, err := regexp.Compile(got); err != nil {
+			t.Fatalf("译后的 pattern 必须能被 RE2 编译: %v", err)
+		}
+	})
+
+	t.Run("js \\u{...} brace form translated", func(t *testing.T) {
+		bs := string(byte(92))
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":{"properties":{"emoji":{"type":"string","pattern":"^` + bs + bs + `u{1F600}$"}}}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		want := `^` + bs + `x{1F600}$`
+		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "emoji", "pattern"); got != want {
+			t.Fatalf("pattern = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("untranslatable pattern dropped", func(t *testing.T) {
+		// 译完仍编不过（括号不配对）→ 丢掉这条 pattern，兄弟字段保留。
+		// 丢它只是放宽一条本地正则；留着等于让整包 tools 被上游 11129 否掉。
+		bs := string(byte(92))
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":{"properties":{"q":{"type":"string","pattern":"a` + bs + bs + `uD800("}}}}}]}`
+		out := string(PrepareBodyOptWithEfforts([]byte(body), false, nil))
+		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "q", "pattern"); got != "" {
+			t.Fatalf("编不过的 pattern 应被丢弃，得到 %q", got)
+		}
+		if got := lookupPattern(t, out, "tools", 0, "function", "parameters", "properties", "q", "type"); got != "string" {
+			t.Fatalf("sibling field disturbed: %q", got)
+		}
+	})
+
+	t.Run("patternProperties key \\u translated", func(t *testing.T) {
+		// 键也是正则，与 pattern 值同口径；写死在 pattern 上的修复不能只覆盖值。
+		bs := string(byte(92))
+		body := `{"messages":[],"tools":[{"type":"function","function":{"name":"t","parameters":{"patternProperties":{"^x` + bs + bs + `uD800$":{"type":"string"}}}}}]}`
+		out := PrepareBodyOptWithEfforts([]byte(body), false, nil)
+		var obj map[string]any
+		if err := json.Unmarshal(out, &obj); err != nil {
+			t.Fatalf("out not json: %v", err)
+		}
+		props := obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)["patternProperties"].(map[string]any)
+		want := `^x` + bs + `x{D800}$`
+		if _, ok := props[want]; !ok {
+			t.Fatalf("归一后的键缺失，得到 %v（want %q）", props, want)
+		}
+		for k := range props {
+			if strings.Contains(k, `\u`) {
+				t.Fatalf("patternProperties 键仍是 JS 转义形态: %q", k)
+			}
 		}
 	})
 
