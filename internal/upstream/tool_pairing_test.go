@@ -135,13 +135,21 @@ func TestMergeAdjacentToolCalls(t *testing.T) {
 		assertSummary(t, summarize(out), []string{"assistant(c00)", "assistant(c01)"})
 	})
 
-	t.Run("前一条无 tool_calls 不合并", func(t *testing.T) {
+	t.Run("前一条纯正文 + 本条带调用合并（同一轮被拆成两条）", func(t *testing.T) {
+		// 旧决策是「前一条没有 tool_calls 就不合并」（不猜语义）。现按实案改为合并：
+		// Codex 类客户端在同一轮先输出一句进度正文、再单独发 function_call item，
+		// /v1/responses 适配层拼出来就是这两条相邻 assistant；不合并时 Kimi/GLM 系会
+		// 在「进度那一句」处收尾（看到上一轮已说过话、没有待办），工具永远不被调用。
+		// 边界不变：隔着 user/tool/system 不合并、两条都有正文不合并、数组正文不合并。
 		in := msgs(t, `[{"role":"assistant","content":"hi"},`+aNil+"]")
 		out, changed := mergeAdjacentToolCalls(in)
-		if changed {
-			t.Error("changed=true，前一条无 tool_calls 不应合并")
+		if !changed {
+			t.Fatal("changed=false，同一轮的正文 + 调用应合并")
 		}
-		assertSummary(t, summarize(out), []string{"assistant(-)", "assistant(c00)"})
+		assertSummary(t, summarize(out), []string{"assistant(c00)"})
+		if got := out[0].(map[string]any)["content"]; got != "hi" {
+			t.Fatalf("正文丢失: %#v", got)
+		}
 	})
 
 	t.Run("reasoning_content 逐条保留（换行拼接）", func(t *testing.T) {

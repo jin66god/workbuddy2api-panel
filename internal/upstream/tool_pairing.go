@@ -375,7 +375,8 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 //   - 两条消息**相邻**（中间隔着任何消息都不合并——隔着消息说明不是同一批声明，
 //     凭猜测合并会改变语义，这类形态按其原样交给 repackToolResultBlocks 处理）；
 //   - 后一条 content 为空（content 非空无法无损拼接，不猜语义）；
-//   - 前一条本身必须是带 tool_calls 的 assistant（否则不合并，例如 assistant 文本 + 独立工具调用消息）。
+//   - 只在「正文 + 调用」这一对之间合并：形态一（调用+调用）、形态二（调用+正文）、
+//     形态三（正文+调用）都必须有一条带 tool_calls、另一条是空正文或纯字符串正文。
 //
 // reasoning_content（thinking.go 的多轮回填字段）不丢：后一条有则搬到合并结果，两边都有则换行拼接
 // （deepseek 多轮要求 assistant 带思维链回填，丢弃会换一个错误）。
@@ -402,6 +403,31 @@ func mergeAdjacentToolCalls(messages []any) ([]any, bool) {
 							mergeReasoningContent(prev, msg)
 							changed = true
 							continue // 本条已并入上一条，不再单独出站
+						}
+					}
+				}
+			}
+			// 形态三：本条是带 tool_calls 且无正文的 assistant，上一条是**纯正文**
+			// assistant（无 tool_calls）→ 把调用挂到上一条上，合成 assistant(正文 + tool_calls)。
+			//
+			// 谁会产出这个顺序：Codex 类客户端在同一轮先输出一句进度正文、再单独发
+			// function_call item（/v1/responses 的 input 就是两条相邻 item）。回放成两条
+			// assistant 后，Kimi/GLM 系会在「进度那一句」处收尾：它看到上一轮已经说过话、
+			// 没有待办，于是只回一句进度就停，工具永远不被调用。
+			//
+			// 条件同样从严：只认**字符串正文**（数组正文可能含多模态块，合并会丢结构）；
+			// 上一条必须完全没有 tool_calls；两条必须相邻（中间隔着 user/tool/system
+			// 就说明不是同一轮，交给 repackToolResultBlocks 原样处理）。
+			if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 && emptyContent(msg["content"]) {
+				if prev, ok := out[len(out)-1].(map[string]any); ok {
+					if prevRole, _ := prev["role"].(string); prevRole == "assistant" {
+						if _, prevHasCalls := prev["tool_calls"]; !prevHasCalls {
+							if txt, ok := prev["content"].(string); ok && txt != "" {
+								prev["tool_calls"] = tcs
+								mergeReasoningContent(prev, msg)
+								changed = true
+								continue // 调用已挂到上一条，不再单独出站
+							}
 						}
 					}
 				}
