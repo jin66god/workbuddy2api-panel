@@ -30,6 +30,12 @@ import (
 // ErrBadParams 皆有可能（Classify 词表不含 11133），hint 层自带判定（hint 是补充
 // 说明非权威分类，误判代价只是多一条中性补充说明）；其余走 Kind 一对一映射。
 func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
+	// 11103「Backend [x] is not supported」：该模型的上游后端没启用/配置不全，换号无用。
+	// 必须排在 isModelParamInvalid 的通用文案之前，否则客户端只看到「参数被拒」，
+	// 会去改参数而不是换模型。
+	if hasBusinessCode(msg, "11103") || codeMarker(strings.ToLower(msg), "11103") {
+		return "this model's backend is not enabled upstream (11103); switching accounts will not help — switch model"
+	}
 	// 11133 model_param_invalid 家族（图片回归实测：不支持图片的模型传图，或任意
 	// 参数被模型供应商拒绝）。只有请求确实带图、且目录能对该模型做出「不支持图片」
 	// 的判定时才给「换模型」指向，否则退中性参数形态（可能是任意参数问题，不点名图片）。
@@ -174,6 +180,8 @@ var frameRequestCodes = []struct {
 	{"11129", ErrBadParams},
 	{"11133", ErrModelParamInvalid},
 	{"11135", ErrImageInvalid},
+	// 11103 后端未启用：请求级（换号无用），与 Classify 的 400 分支同口径。
+	{"11103", ErrModelParamInvalid},
 	{"11148", ErrToolMismatch},
 	{"11151", ErrEmptyContent},
 	{"11152", ErrBadParams},

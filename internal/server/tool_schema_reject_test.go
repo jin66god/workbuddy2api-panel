@@ -51,6 +51,12 @@ func TestToolSchemaRejectedIsRequestLevel(t *testing.T) {
 			wantCode: "tool_call_mismatch",
 		},
 		{
+			name:     "11103 模型后端未启用",
+			status:   400,
+			body:     `{"code":11103,"msg":"Backend [deepseek-v4] is not supported"}`,
+			wantCode: "model_param_invalid",
+		},
+		{
 			name:     "11133 参数被模型拒绝",
 			status:   400,
 			body:     `{"code":11133,"msg":"model_param_invalid: max_tokens below minimum"}`,

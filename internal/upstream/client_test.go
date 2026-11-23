@@ -100,6 +100,10 @@ func TestClassify(t *testing.T) {
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
+		// 11103「Backend [x] is not supported」：该模型的上游后端未启用/配置不全，
+		// 换遍全池同一句（实测 25 个号 25 次），归请求级（不轮转、不喂连败）。
+		{400, `{"code":11103,"msg":"Backend [deepseek-v4] is not supported"}`, ErrModelParamInvalid},
+		{400, `{"error":{"code":"11103","message":"backend is not supported"}}`, ErrModelParamInvalid},
 		// 11102「该模型 id 在上游不存在」：模型级确定性答复，归 ErrModelMissing（请求级：
 		// 不轮转、不写 (账号,模型) 负缓存）——换遍全池都是同一句，轮转只会白打号。
 		{404, `{"code":11102,"msg":"model [deepseek-v3-2-volc] service info not found"}`, ErrModelMissing},
