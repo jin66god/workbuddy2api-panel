@@ -1449,6 +1449,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 11102「该模型 id 上游不存在」：模型级而非账号级——同一 body 换遍全池是同一
+			// 句话，轮转只会白打号、给每个号写一笔 (账号,模型) 负缓存（一次写错的 id 就
+			// 变成全池避让），末端还会给出「换另一个号重试」这种反向建议。立即透传上游
+			// 原文回 400，不发下次请求、不罚号。
+			if kind == upstream.ErrModelMissing {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				failKeepBinding(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "upstream does not have this model id"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "model_unavailable", msg,
+					h.hintOf(upstream.ErrModelMissing, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// 6021「queue.full.title」渠道级容量满载：**不罚号不轮转**，立即透传
 			// 上游原文回客户端（503 + upstream_busy）。上游集群排队打满时换任何
 			// 账号都撞同一堵墙——按限流处置会逐号软冷却，实测 2 秒绞杀整池健康号
@@ -1850,11 +1867,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusServiceUnavailable
 			code = "model_busy"
 			msg = "model backend is temporarily busy; retry after a short wait"
-		case upstream.ErrModelBlocked:
-			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
+		case upstream.ErrModelMissing, upstream.ErrModelBlocked:
+			// 11102「该模型 id 上游不存在」：上游原文（下方统一透传）已经写清了原因，但
 			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
 			// 客户端据此会不断重试（#81 里就是 503 → 客户端自动重试 5 次），而真正
-			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
+			// 该做的是换个模型（11102）或有权限的号（11158）。用 400 + 明确的 code
+			// 把不可重试的性质讲清楚。防御路径：两者正常都已在轮转循环内处置。
 			code = "model_unavailable"
 			status = http.StatusBadRequest
 		case upstream.ErrToolMismatch:
@@ -2115,7 +2133,9 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //   - ErrImageInvalid → 图片格式/数据无效：请求的问题不是账号的问题（同一 body
 //     换任何号都会得到相同的解析错误）。零动作（不冷却/不熔断/不 NoteError、
 //     不喂连败），chatCompletions 已直接透传原文返回不轮转。
-//   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102/11158 负缓存避让。
+//   - ErrModelMissing → 零动作：11102「该模型 id 上游不存在」是模型级（换遍全池同一句），
+//     循环内即刻 400 终止，且不写负缓存。
+//   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11158 负缓存避让（换到有权限的号仍可成功）。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断；ErrClient
@@ -2290,11 +2310,17 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 换号也撞同一堵墙。零动作（不冷却/不熔断/不 NoteError/不喂连败，同
 		// ErrContentBlocked 待遇）；chatCompletions 已 fail-fast 503 透传原文、
 		// 终止轮转——该分支只为文档完备。
+	case upstream.ErrModelMissing:
+		// 11102「该模型 id 在上游不存在」：模型级而非账号级——换遍全池是同一句。零动作
+		// （不冷却/不熔断/不 NoteError/不喂连败），也**不写 (账号,模型) 负缓存**：一次
+		// 客户端写错的 id 不该把该模型从全池里锁掉。轮转终止与 400 透传原文由
+		// chatCompletions 的请求级分支负责。
 	case upstream.ErrModelBlocked:
-		// 11102「该后端无此模型」/11158「该账号类型无此模型权限」：
+		// 11158「该账号类型无此模型权限」（11102 走上面的请求级分支，不在此）：
 		// (账号, 模型) 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），
 		// 选号侧 healthyForModel 对该账号自动避开该模型。
-		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
+		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开——换到有权限的
+		// 账号真能成功，故这里保留轮转。
 		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReasonFor(body))
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。

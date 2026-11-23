@@ -74,8 +74,14 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrGatewayDown:
 		// 520/522/524 是网关到源站这一跳失败，换号/换 token 都不会好转。
 		return "upstream gateway error (Cloudflare 5xx): the origin behind the gateway is unreachable or returned an invalid response; this is not an account problem — retry after a short wait"
+	case ErrModelMissing:
+		// 11102：模型 id 在上游不存在（id 大小写敏感，display name 也算不存在——
+		// 实测「DeepSeek-V4.1-Flash」全池 11102，换成 id「deepseek-v4.1-flash」立刻 200）。
+		// 必须点名「换号无用」，否则客户端会按旧文案换号重试，白跑一轮。
+		return "model id does not exist upstream (ids are case-sensitive); copy the id from /v1/models — switching accounts will not help"
 	case ErrModelBlocked:
-		return "upstream has no such model on this backend; switch model or retry on another account"
+		// 11158：该账号类型无权使用该模型——换到有权限的号（或订阅档位更高的号）真能成功。
+		return "this account type is not allowed to use the model; the gateway will try accounts with permission"
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
