@@ -243,12 +243,12 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	}
 	if v3.err != nil {
 		// /v3 失败降级：不拖累企业端点结果（降级仅企业端点 + warn）。
-		log.Printf("WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
+		degradedWarnOnce("global-models/v3", "WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
 		names, infos, efforts, defaults = extractEfforts(enterprise.infos)
 		return names, infos, efforts, defaults, nil
 	}
 	if enterprise.err != nil {
-		log.Printf("WARN: [upstream] global models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
+		degradedWarnOnce("global-models/enterprise", "WARN: [upstream] global models: enterprise endpoint failed (degraded to v3/config, catalog served normally): %v", enterprise.err)
 		names, infos, efforts, defaults = extractEfforts(v3.infos)
 		return names, infos, efforts, defaults, nil
 	}
@@ -312,6 +312,28 @@ func mergeV3Routes(routes []struct {
 	}
 	return out
 }
+
+// degradedWarnOnce 只在一路模型目录探测**首次**降级时打一行 WARN。
+//
+// 为什么需要：企业端点是永续 500、而 /v3/config 每次都能接住，目录照常下发、功能正常；
+// 但每轮 warm model rates 都重打一行 WARN，几天下来几十条，把真故障淹掉。同状态后续静默。
+//
+// 代价：恢复后再失败不会重新告警，得等进程重启；逐次可见性靠每轮都写的 warm model rates
+// 那行（ok / failed 都在），面板上的目录来源（GlobalCatalogSource）也照旧实时反映。
+func degradedWarnOnce(key, format string, args ...any) {
+	degradedWarnMu.Lock()
+	defer degradedWarnMu.Unlock()
+	if degradedWarnSeen[key] {
+		return
+	}
+	degradedWarnSeen[key] = true
+	log.Printf(format, args...)
+}
+
+var (
+	degradedWarnMu   sync.Mutex
+	degradedWarnSeen = map[string]bool{}
+)
 
 // extractEfforts 从条目列表抽取 effort 能力桶（supportedEfforts 数组优先；
 // 缺数组但 defaultEffort 单档非空也入 defaults 桶）并顺带返回有序 names。
