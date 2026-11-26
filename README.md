@@ -171,6 +171,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 到期提醒 | 首页快照与「检查」同口径：按自然日聚合批次，`DeductionEndTime` 优先，标注后台刷新节奏 |
 | 更新提醒与一键更新 | 定时查 GitHub Releases，面板顶栏提示新版本；配旁路升级器（watchtower HTTP API）后「立即更新」直接拉镜像重建，未配置则降级为复制 compose 命令 |
 | 积分到期折叠 | 折叠状态内存兜底（localStorage 抛 `SecurityError` 时仍可用）+ 静态资源 `no-cache` + `?v=<版本>` 破 CDN 缓存 |
+| 静态资源协商 | 四个内置文本资源在启动时预压缩 gzip（实测 337 KiB → 109 KiB），带强 ETag、`Vary: Accept-Encoding` 与显式 `Content-Length`：内容未变回 304 零字节，`no-cache` + `?v=<版本>` 保证升级即失效；SSE 与 `/panel/api/*` 一律不压 |
 
 ### 接入与协议
 

@@ -28,6 +28,13 @@ var mobileCSS []byte
 //go:embed mobile.js
 var mobileJS []byte
 
+// 三个不随请求变化的内置资源：启动时构造一次（含预压缩与 ETag），之后每次请求零分配。
+var (
+	appJSAsset     = newStaticAsset(appJS, "text/javascript; charset=utf-8")
+	mobileCSSAsset = newStaticAsset(mobileCSS, "text/css; charset=utf-8")
+	mobileJSAsset  = newStaticAsset(mobileJS, "text/javascript; charset=utf-8")
+)
+
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
 //   - script-src 'self'         只跑同源脚本（app.js / mobile.js）；页面无内联事件处理器/内联脚本
@@ -65,10 +72,8 @@ func setSecurityHeaders(w http.ResponseWriter) {
 // 为「点了完全没反应」（真实反馈：1.13.4 的「收起」按钮，源站已升级、CF 仍 HIT 旧 app.js）。
 // URL 带版本后每次发版 URL 都变，CDN 与浏览器缓存自动失效，无需人工 purge。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(versionedIndex(p.cfg.Version))
+	// 页面正文按版本替换过（?v=<版本>）：按版本缓存一份，含预压缩与 ETag。
+	serveStatic(w, r, indexAsset(p.cfg.Version))
 }
 
 // versionedIndex 给 index.html 里的 app.js / mobile.js / mobile.css 引用加 ?v=<版本>。
@@ -86,25 +91,16 @@ func versionedIndex(version string) []byte {
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(appJS)
+	serveStatic(w, r, appJSAsset)
 }
 
 // mobileStyle 输出手机端适配样式（同源样式表，CSP style-src 'self' 加载）。
 // 单独成文而非写进 index.html：上游频繁改 index.html，独立文件可避免同步上游时反复冲突。
 func (p *Panel) mobileStyle(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(mobileCSS)
+	serveStatic(w, r, mobileCSSAsset)
 }
 
 // mobileScript 输出手机端联动逻辑（同源脚本，须在 app.js 之后加载）。
 func (p *Panel) mobileScript(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(mobileJS)
+	serveStatic(w, r, mobileJSAsset)
 }
