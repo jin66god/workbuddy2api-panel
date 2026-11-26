@@ -390,6 +390,24 @@ setTimeout(() => {
    不用在 cn/global 两段之间滚动。纯展示状态，不改调度与计费。 */
 let accRealmFilter = 'all';
 
+// coolKindLabel 冷却标签的判定：按服务端给的 cool_kind 枚举，不比较秒数。
+//
+// 为什么不能比秒数：cool_remaining_sec 是服务端 time.Until()+0.999 取整后的**整秒**，
+// 而前端 bl/dg 是按 breaker_until / degrade_until 现算的**浮点秒**，两者只差几十毫秒
+// ⇒ 「bl > cool_remaining_sec」恒为 false，于是「只有熔断」永远显示成「限流冷却」。
+// 服务端 state.go 已经算出谁截止更晚并写进 cool_kind（breaker / hard_credit / soft_rate），
+// 前端直接照抄枚举即可。
+function coolKindLabel(s, bl, dg) {
+  // bl / dg 都是前端按 breaker_until / degrade_until 现算的浮点秒，两者可以直接比较；
+  // 绝不能拿它们跟 cool_remaining_sec（服务端向上取整的整秒）比——那样熔断恒不成立。
+  if (bl > 0 && bl >= dg) return '熔断';
+  if (dg > 0) return '连败降权';
+  // 两个时间戳都取不到时，按服务端的枚举兜底（state.go 已算出谁截止更晚）。
+  if (s.cool_kind === 'breaker') return '熔断';
+  if (s.cool_kind === 'hard_credit') return '积分冷却';
+  return '限流冷却';
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
@@ -407,8 +425,7 @@ function renderAccounts(list) {
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
     else if (cool > 0) {
       cls = 'cool';
-      const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
-        : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
+      const kind = coolKindLabel(s, bl, dg);
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
     // reason 只在冷却/禁用仍生效时展示（issue #171 问题一）：服务端已按同一口径归一，

@@ -226,6 +226,52 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// 冷却标签必须按服务端 cool_kind 判，不能比较秒数。
+//
+// cool_remaining_sec 是服务端 time.Until()+0.999 取整后的整秒，bl / dg 是前端现算的
+// 浮点秒，两者只差几十毫秒 ⇒ 「bl > cool_remaining_sec」恒为 false，「只有熔断」的账号
+// 会永远显示成「限流冷却」（运维据此判断错冷却类型）。
+func TestAppJSCoolKindLabel(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; cool kind label test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function coolKindLabel(');
+const end = src.indexOf('function renderAccounts(');
+if (start < 0 || end < 0) throw new Error('coolKindLabel not found');
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.coolKindLabel=coolKindLabel;', ctx);
+process.stdout.write(JSON.stringify({
+  breaker: ctx.coolKindLabel({ cool_kind: 'breaker', cool_remaining_sec: 720 }, 700, 0),
+  breakerNoTs: ctx.coolKindLabel({ cool_kind: 'breaker', cool_remaining_sec: 720 }, 0, 0),
+  hardCredit: ctx.coolKindLabel({ cool_kind: 'hard_credit', cool_remaining_sec: 720 }, 0, 0),
+  soft: ctx.coolKindLabel({ cool_kind: 'soft_rate', cool_remaining_sec: 720 }, 0, 0),
+  degrade: ctx.coolKindLabel({ cool_kind: 'soft_rate', cool_remaining_sec: 60 }, 0, 120),
+  degradeBeatsBreaker: ctx.coolKindLabel({ cool_kind: 'breaker', cool_remaining_sec: 300 }, 100, 240),
+  missing: ctx.coolKindLabel({}, 0, 0),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "cool-kind-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("cool kind label node test failed: %v\n%s", err, out)
+	}
+	const want = `{"breaker":"熔断","breakerNoTs":"熔断","hardCredit":"积分冷却","soft":"限流冷却","degrade":"连败降权","degradeBeatsBreaker":"连败降权","missing":"限流冷却"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("cool kind label=%s want %s", out, want)
+	}
+}
+
 // 请求记录行必须紧凑、可读，并带上调用来源（IP / UA）；来源缺失时以 — 兜底。
 func TestAppJSRequestLogFormatting(t *testing.T) {
 	node, err := exec.LookPath("node")
