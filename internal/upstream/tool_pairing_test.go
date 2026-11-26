@@ -125,14 +125,24 @@ func TestMergeAdjacentToolCalls(t *testing.T) {
 		assertSummary(t, summarize(out), []string{"assistant(c00)", "user(-)", "assistant(c01)", "tool(c00)", "tool(c01)"})
 	})
 
-	t.Run("后一条 content 非空不合并", func(t *testing.T) {
-		// content 非空无法无损拼接：不猜语义，原样交给上游。
+	t.Run("前一条带调用时后一条的正文也并批", func(t *testing.T) {
+		// 2026-11-26 现场证据：Responses 回放把「一句进度正文 + 后一批调用」落在同一条
+		// assistant 上，前一批调用被正文顶着 flush 成独立一条，出站即「相邻两批」——
+		// 前一批成了无结果调用，上游判 11148 并顶死整条会话。
+		//
+		// 旧决策是「content 非空无法无损拼接，不猜语义」，只在现场只有「两条都不带正文」
+		// 时才成立。前一条已声明 tool_calls 时，这形态在 wire 上必然是断轮（合法多轮里
+		// 声明调用的 assistant 之后只能紧跟本批 tool 结果），并批不会改变合法会话的语义，
+		// 故翻契约：正文按原顺序拼接、调用并批。
 		in := msgs(t, "["+aNil+`,{"role":"assistant","content":"text","tool_calls":[{"id":"c01"}]}`+"]")
 		out, changed := mergeAdjacentToolCalls(in)
-		if changed {
-			t.Error("changed=true，content 非空不应合并")
+		if !changed {
+			t.Fatal("changed=false，前一条带调用时后一条的正文应并批")
 		}
-		assertSummary(t, summarize(out), []string{"assistant(c00)", "assistant(c01)"})
+		assertSummary(t, summarize(out), []string{"assistant(c00,c01)"})
+		if got := out[0].(map[string]any)["content"]; got != "text" {
+			t.Fatalf("正文丢失: %#v", got)
+		}
 	})
 
 	t.Run("前一条纯正文 + 本条带调用合并（同一轮被拆成两条）", func(t *testing.T) {
@@ -140,7 +150,8 @@ func TestMergeAdjacentToolCalls(t *testing.T) {
 		// Codex 类客户端在同一轮先输出一句进度正文、再单独发 function_call item，
 		// /v1/responses 适配层拼出来就是这两条相邻 assistant；不合并时 Kimi/GLM 系会
 		// 在「进度那一句」处收尾（看到上一轮已说过话、没有待办），工具永远不被调用。
-		// 边界不变：隔着 user/tool/system 不合并、两条都有正文不合并、数组正文不合并。
+		// 边界不变：隔着 user/tool/system 不合并、数组正文不合并；前一条没有调用且双方都有正文
+	// 时同样不合并（那是两条真实回复相邻，不是断轮）。
 		in := msgs(t, `[{"role":"assistant","content":"hi"},`+aNil+"]")
 		out, changed := mergeAdjacentToolCalls(in)
 		if !changed {

@@ -110,13 +110,16 @@ func PrepareBodyOptWithRounds(src []byte, sanitize bool, efforts map[string][]st
 	//  1. reorderEarlyToolResults 必须最前——「结果排在其调用之前」的倒置只有它能修。
 	//     倒置未修时 repack 会把那条早到的 tool 当普通消息直通（role != assistant），
 	//     cleanup 又因两侧 id 都在判「配对完整」放行，倒置就一路带上去撞 11148。
-	//  2. mergeAdjacentToolCalls 把「背靠背的两条 assistant.tool_calls」合成一条（部分
-	//     agent 客户端回放并行调用的报文形状），是 deepseek 系模型 11148 的正面修复。
-	//     放在早到结果回位之后：夹在两条 assistant 中间的倒置 tool 已被挪走，两条调用
-	//     才真的相邻，合并才有机会发生。
+	//  2. mergeAdjacentToolCalls 把「背靠背的两条 assistant」合成一条：前后两条都带
+	//     tool_calls 的形态（部分 agent 客户端回放并行调用的报文形状），以及后一条
+	//     带正文、带调用的形态（「先说一句进度，再发调用」被拆成两条），都是 deepseek
+	//     系模型 11148 的正面修复。放在早到结果回位之后：夹在两条 assistant 中间的
+	//     倒置 tool 已被挪走，两条调用才真的相邻，合并才有机会发生。
 	//  3. repackToolResultBlocks 把插在结果中间的非 tool 消息（Codex image_resize_notice）
-	//     挪到整组之后，保证同批结果在 wire 上连续。
-	//  4. cleanupOrphanToolCalls 删掉两侧缺一的孤儿，与前三步同口径。
+	//     挪到整组之后，保证同批结果在 wire 上连续；对不上本批的孤儿结果同样后移，
+	//     不遮挡它后面的本批合法结果。
+	//  4. cleanupOrphanToolCalls 删掉两侧缺一的孤儿、同一 call_id 的重复结果只留第一条，
+	//     与前三步同口径。
 	if msgs, ok := obj["messages"].([]any); ok {
 		msgs, _ = reorderEarlyToolResults(msgs)
 		msgs, _ = mergeAdjacentToolCalls(msgs)

@@ -184,7 +184,15 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 			if role == "tool" {
 				id, _ := mm["tool_call_id"].(string)
 				if !want[id] {
-					break
+					// 孤儿结果（对不上本批任何调用）：暂存待后移，**不能 break** ——
+					// 它后面可能还有本批的合法结果，break 会让那些结果永久停在原位、
+					// 中间夹着插入物，出站照样 11148（实测：tool(c0) | user | tool(c1)
+					// 里的 user 被夹在两份结果之间）。孤儿本身稍后由
+					// cleanupOrphanToolCalls 整条删除，这里只保证它不遮挡后续结果。
+					between = append(between, messages[i])
+					sawNonTool = true
+					i++
+					continue
 				}
 				results = append(results, messages[i])
 				if sawNonTool {
@@ -325,8 +333,10 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		}
 		msg["tool_calls"] = keptCalls
 	}
-	// 2) role:tool 结果：只有对应 tool_call 被保留才保留；孤儿结果整条删除。
+	// 2) role:tool 结果：只有对应 tool_call 被保留才保留；孤儿结果整条删除；
+	// 同一 call_id 的重复结果只留第一条（上游一个调用只认一条结果，多出来的判 11148）。
 	kept := make([]any, 0, len(messages))
+	seenResult := make(map[string]bool, len(resultIDs))
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
 		if !ok {
@@ -335,10 +345,11 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 		}
 		if role, _ := msg["role"].(string); role == "tool" {
 			id, _ := msg["tool_call_id"].(string)
-			if !keepCalls[id] {
+			if !keepCalls[id] || seenResult[id] {
 				changed = true
 				continue
 			}
+			seenResult[id] = true
 		}
 		kept = append(kept, m)
 	}
@@ -348,7 +359,7 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 	return kept, true
 }
 
-// mergeAdjacentToolCalls 把**背靠背**的 assistant.tool_calls 消息合成一条（tool_calls 依原序拼接）。
+// mergeAdjacentToolCalls 把**背靠背**的 assistant 消息合成一条（tool_calls 依原序拼接）。
 //
 // 2026-09-20 实机定位并复现的 11148 事故根因：部分 OpenAI 兼容 agent 客户端回放历史时把
 // 同一批并行工具调用拆成多条紧邻的独立 assistant 消息，出站载荷长成：
@@ -371,15 +382,23 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 // 即：**行为本身合法**（上述第一种形态在 OpenAI 规范里也说得通），是上游 deepseek 系模型的
 // 校验更严。网关作为最后一道防线按最严口径归一，客户端不必感知。
 //
-// 合并条件从严，避免引入新语义：
-//   - 两条消息**相邻**（中间隔着任何消息都不合并——隔着消息说明不是同一批声明，
-//     凭猜测合并会改变语义，这类形态按其原样交给 repackToolResultBlocks 处理）；
-//   - 后一条 content 为空（content 非空无法无损拼接，不猜语义）；
-//   - 只在「正文 + 调用」这一对之间合并：形态一（调用+调用）、形态二（调用+正文）、
-//     形态三（正文+调用）都必须有一条带 tool_calls、另一条是空正文或纯字符串正文。
+// 合并条件按「前一条是否声明了 tool_calls」分两档：
 //
-// reasoning_content（thinking.go 的多轮回填字段）不丢：后一条有则搬到合并结果，两边都有则换行拼接
-// （deepseek 多轮要求 assistant 带思维链回填，丢弃会换一个错误）。
+//   - 前一条**带** tool_calls：紧随其后的 assistant 一律并进来（正文拼接、调用并批）。
+//     合法的多轮里，声明了调用的 assistant 后面只能跟本批的 tool 结果，不可能紧跟另一条
+//     assistant——所以这种形态在 wire 上必然是「前一批调用没有结果」的断轮，并批不会改变
+//     合法会话的语义。后一条**带正文**也必须并：真实事故里 Responses 回放会把正文与后一批
+//     调用落在同一条 assistant 上（「先说一句进度，再发两个 function_call」），前一批调用
+//     被正文顶着 flush 成独立一条，出站即相邻两批，前一批成了无结果调用。
+//   - 前一条**不带** tool_calls（纯正文）：只有后一条「无正文、只声明调用」时才合并（形态三，
+//     Codex 同一轮先报进度再发 function_call）。双方都有正文时无法无损拼接，不猜语义——
+//     那条路径在 wire 上不是断轮，只是两条真实回复相邻。
+//
+// 两条边界一致：只认**字符串或缺省**正文（数组正文可能含多模态块，拼接会丢结构，宁可漏修
+// 也不改形状）；只有**相邻**才合并（隔着 user/tool/system 说明不是同一轮）。
+//
+// reasoning_content（thinking.go 的多轮回填字段）不丢：后一条有则搬到合并结果，两边都有则
+// 换行拼接（deepseek 多轮要求 assistant 带思维链回填，丢弃会换一个错误）。
 func mergeAdjacentToolCalls(messages []any) ([]any, bool) {
 	if len(messages) < 2 {
 		return messages, false
@@ -388,72 +407,51 @@ func mergeAdjacentToolCalls(messages []any) ([]any, bool) {
 	changed := false
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
-		if !ok {
+		if !ok || msg["role"] != "assistant" || len(out) == 0 {
 			out = append(out, m)
 			continue
 		}
-		if role, _ := msg["role"].(string); role == "assistant" && len(out) > 0 {
-			// 形态一：本条是带 tool_calls 的 assistant 且没有正文 → 并入上一条
-			// 同为 assistant 且带 tool_calls 的消息（背靠背的并行调用声明）。
-			if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 && emptyContent(msg["content"]) {
-				if prev, ok := out[len(out)-1].(map[string]any); ok {
-					if prevRole, _ := prev["role"].(string); prevRole == "assistant" {
-						if prevCalls, ok := prev["tool_calls"].([]any); ok && len(prevCalls) > 0 {
-							prev["tool_calls"] = append(prevCalls, tcs...)
-							mergeReasoningContent(prev, msg)
-							changed = true
-							continue // 本条已并入上一条，不再单独出站
-						}
-					}
-				}
+		prev, ok := out[len(out)-1].(map[string]any)
+		if !ok || prev["role"] != "assistant" {
+			out = append(out, m)
+			continue
+		}
+		// 正文形状未知（多模态数组等）不拼接：宁可漏合并也不丢结构。
+		// 例外是「后一条没有正文要贡献」（nil / 空串 / 空数组）——这一形态下前一条的
+		// 正文原样保留、只并调用，不涉及任何拼接，前一条是数组也必须并。
+		if !emptyContent(msg["content"]) && (!mergeableText(prev["content"]) || !mergeableText(msg["content"])) {
+			out = append(out, m)
+			continue
+		}
+		prevCalls, _ := prev["tool_calls"].([]any)
+		curCalls, _ := msg["tool_calls"].([]any)
+		if len(prevCalls) > 0 {
+			// 前一条已声明调用：后一条的正文与调用都并进来（前一批调用无结果 = 断轮）。
+			// 合并结果写进**新 map**，不改调用方传进来的消息（同一 body 被重复预处理时
+			// 不会把同一批调用并两遍）。
+			merged := cloneMessage(prev)
+			joinAssistantText(merged, msg)
+			if len(curCalls) > 0 {
+				calls := make([]any, 0, len(prevCalls)+len(curCalls))
+				calls = append(calls, prevCalls...)
+				calls = append(calls, curCalls...)
+				merged["tool_calls"] = calls
 			}
-			// 形态三：本条是带 tool_calls 且无正文的 assistant，上一条是**纯正文**
-			// assistant（无 tool_calls）→ 把调用挂到上一条上，合成 assistant(正文 + tool_calls)。
-			//
-			// 谁会产出这个顺序：Codex 类客户端在同一轮先输出一句进度正文、再单独发
-			// function_call item（/v1/responses 的 input 就是两条相邻 item）。回放成两条
-			// assistant 后，Kimi/GLM 系会在「进度那一句」处收尾：它看到上一轮已经说过话、
-			// 没有待办，于是只回一句进度就停，工具永远不被调用。
-			//
-			// 条件同样从严：只认**字符串正文**（数组正文可能含多模态块，合并会丢结构）；
-			// 上一条必须完全没有 tool_calls；两条必须相邻（中间隔着 user/tool/system
-			// 就说明不是同一轮，交给 repackToolResultBlocks 原样处理）。
-			if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 && emptyContent(msg["content"]) {
-				if prev, ok := out[len(out)-1].(map[string]any); ok {
-					if prevRole, _ := prev["role"].(string); prevRole == "assistant" {
-						if _, prevHasCalls := prev["tool_calls"]; !prevHasCalls {
-							if txt, ok := prev["content"].(string); ok && txt != "" {
-								prev["tool_calls"] = tcs
-								mergeReasoningContent(prev, msg)
-								changed = true
-								continue // 调用已挂到上一条，不再单独出站
-							}
-						}
-					}
-				}
-			}
-			// 形态二（反向）：本条是纯正文 assistant，上一条是带 tool_calls 但没正文的
-			// assistant → 把正文折进上一条，合成 assistant(正文 + tool_calls)。这样
-			// "声明 tool_calls 的 assistant 紧跟它自己的结果"在两种拆分顺序下都成立。
-			//
-			// 谁会产出这个顺序：部分 OpenAI 兼容 agent 客户端的回放顺序（正文与
-			// 调用声明拆成两条独立 assistant）。
-			//
-			// 条件同样从严：只认**字符串正文**（数组正文可能含多模态块，拼接会丢结构，
-			// 交给 repackToolResultBlocks 原样处理）；上一条必须自身无正文。
-			if _, hasCalls := msg["tool_calls"]; !hasCalls {
-				if txt, ok := msg["content"].(string); ok && txt != "" {
-					if prev, ok := out[len(out)-1].(map[string]any); ok {
-						if prevRole, _ := prev["role"].(string); prevRole == "assistant" {
-							if prevCalls, ok := prev["tool_calls"].([]any); ok && len(prevCalls) > 0 && emptyContent(prev["content"]) {
-								prev["content"] = txt
-								mergeReasoningContent(prev, msg)
-								changed = true
-								continue // 正文已折进上一条
-							}
-						}
-					}
-				}
+			mergeReasoningContent(merged, msg)
+			out[len(out)-1] = merged
+			changed = true
+			continue
+		}
+		// 形态三：前一条是纯正文，本条只声明调用（无正文）→ 把调用挂到前一条上，
+		// 合成 assistant(正文 + tool_calls)。双方都有正文时不合并（不猜语义）。
+		if len(curCalls) > 0 && emptyContent(msg["content"]) {
+			if txt, _ := prev["content"].(string); txt != "" {
+				merged := cloneMessage(prev)
+				merged["tool_calls"] = curCalls
+				mergeReasoningContent(merged, msg)
+				out[len(out)-1] = merged
+				changed = true
+				continue
 			}
 		}
 		out = append(out, m)
@@ -462,6 +460,47 @@ func mergeAdjacentToolCalls(messages []any) ([]any, bool) {
 		return messages, false
 	}
 	return out, true
+}
+
+// cloneMessage 浅拷贝一条消息 map：合并写进副本，调用方传进来的报文保持不变。
+// （深拷贝没必要——只改 content / tool_calls / reasoning_content 三个顶层键，
+// 且都是整体替换而不是原地修改子结构。）
+func cloneMessage(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// mergeableText content 是否为「字符串、缺省或空数组」——可以无损耗拼接的正文。
+// nil / 缺省 / 字符串都算可并，空数组等价于「没有正文」（部分客户端把 null 发成 []）；
+// 非空多模态数组、数字等形状未知，一律判不可并（宁可漏修也不丢结构）。
+func mergeableText(v any) bool {
+	switch c := v.(type) {
+	case nil, string:
+		return true
+	case []any:
+		return len(c) == 0
+	}
+	return false
+}
+
+// joinAssistantText 把 cur 的正文合并进 prev：双方都空时保持原样（不写空串——空文本段
+// 会撞 11151），只有一方有时直接取那一方，都有则按原顺序拼接。
+func joinAssistantText(prev, cur map[string]any) {
+	ps, _ := prev["content"].(string)
+	cs, _ := cur["content"].(string)
+	switch {
+	case ps == "" && cs == "":
+		return
+	case ps == "":
+		prev["content"] = cs
+	case cs == "":
+		prev["content"] = ps
+	default:
+		prev["content"] = ps + cs
+	}
 }
 
 // mergeReasoningContent 把 src 的 reasoning_content 并入 dst（两边都有则换行拼接）。
