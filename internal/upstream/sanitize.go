@@ -13,6 +13,11 @@ import (
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
+	// Trae 客户端系统提示首句（"You are an interactive agent in TraeCode that helps
+	// the USER …"）：服务端按「interactive agent in TraeCode」这一连续短语判非官方
+	// 渠道（400 11-128）。逐条二分过：单独出现 TraeCode / "in Trae IDE" / "in Cursor"
+	// 均放行，只删掉 "in TraeCode" 后整段 23KB system（21 个工具）即 200。
+	"You are an interactive agent in TraeCode",
 	"x-anthropic-billing-hdr",                         // header 键值段键名
 	"You are an AI agent powered by DeepSeek Harness", // DSH 身份首句（整句匹配；裸品牌词只走身份层）
 	"cc_entrypoint=",                                  // 尾随裸键值（截断前缀即可命中）
@@ -124,6 +129,13 @@ var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 // 注意仍要求 "You are Claude Code, " 前缀，不做更宽的子串替换，
 // 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
 var sanitizeRewrites = [][2]string{
+	{
+		// TraeCode 自述首句：整句前缀替换成不带客户端名的中性表述，句子其余部分与
+		// 行为指令原样保留（只删客户端名，语义不变）。匹配串不带结尾标点，句号 /
+		// 逗号 / 换行三种形态一并覆盖。
+		"You are an interactive agent in TraeCode",
+		"You are an interactive agent",
+	},
 	{
 		// DeepSeek harness 在 system 首句注入的固定身份声明
 		// （"You are an AI agent powered by DeepSeek Harness."）。上游按该句识别
