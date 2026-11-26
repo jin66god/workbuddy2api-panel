@@ -626,7 +626,47 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, entry)
 		}
 	}
+	// 同域同名的优惠条目补标签：上游 hy4-flash-free 与 hy4-flash 的显示名都是
+	// 「Hy4 flash」，一个 x0.00（限时免费）一个 x0.03 —— 只认 name 的客户端里这两行
+	// 长得一样，选了免费那行可能实际发出付费 id（用户看到「用免费模型也在扣积分」）。
+	disambiguatePromoNames(out)
 	return out
+}
+
+// disambiguatePromoNames 给「同域内与兄弟模型重名」的优惠条目补上标签：
+// 上游 hy4-flash-free 与 hy4-flash 的显示名都是「Hy4 flash」，一个 0 分（限时免费）、
+// 一个 x0.03。只认 name 的客户端里这两行长一样，选了免费那行的可能实际发出付费 id。
+//
+// 只在「同域（id 前缀相同）+ 同名 + 带 promo_label」三条同时成立时改名；名字唯一的
+// 条目不碰（多数优惠模型如夜间折扣没有同名兄弟），跨域同名也不碰（id 前缀本来就不同）。
+// 同名的多条里，凡是自带标签的都补上自己的标签（标签不同时才能真正区分）；无标签的
+// 兄弟保持官方名——把其中一条改掉、另一条不改反而更容易看错。
+// id 一个字节都不动：路由与计费只看 id。
+func disambiguatePromoNames(list []map[string]any) {
+	realmName := func(e map[string]any) string {
+		id, _ := e["id"].(string)
+		realm := id
+		if i := strings.IndexByte(id, ':'); i >= 0 {
+			realm = id[:i]
+		}
+		name, _ := e["name"].(string)
+		return realm + "|" + name
+	}
+	count := make(map[string]int, len(list))
+	for _, e := range list {
+		count[realmName(e)]++
+	}
+	for _, e := range list {
+		name, _ := e["name"].(string)
+		label, _ := e["promo_label"].(string)
+		// 键在改名前取：改完 name 之后再算就是另一个键，重复判定会失效。
+		// 凡是同名且自带标签的都补；无标签的兄弟保持官方名（只改一条反而更容易看错）。
+		k := realmName(e)
+		if name == "" || label == "" || count[k] < 2 {
+			continue
+		}
+		e["name"] = name + "（" + label + "）"
+	}
 }
 
 // fetchGlobalModels 返回 global 模型名单（纯动态探测结果）及被探测账号。
